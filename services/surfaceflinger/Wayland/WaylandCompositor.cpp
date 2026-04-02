@@ -29,6 +29,9 @@
 #include <log/log.h>
 #include <wayland-server-protocol.h>
 
+#include <gui/LayerState.h>
+#include <gui/TransactionState.h>
+
 #include "FrontEnd/LayerCreationArgs.h"
 #include "FrontEnd/LayerHandle.h"
 #include "Layer.h"
@@ -210,7 +213,8 @@ void WaylandCompositor::compositorCreateSurface(struct wl_client* client,
 
     // Create SF Layer via createLayer().
     LayerCreationArgs args(&self->mFlinger, nullptr /*client*/, layerName,
-                           ISurfaceComposerClient::eFXSurfaceBufferState,
+                           ISurfaceComposerClient::eFXSurfaceBufferState |
+                           ISurfaceComposerClient::eNoColorFill,
                            gui::LayerMetadata());
     args.addToRoot = true;
 
@@ -220,6 +224,18 @@ void WaylandCompositor::compositorCreateSurface(struct wl_client* client,
         ALOGE("Failed to create SF layer for Wayland surface '%s': %d", layerName.c_str(), err);
         wl_resource_post_no_memory(resource);
         return;
+    }
+
+    // Place the Wayland layer above normal app layers so it's visible.
+    {
+        TransactionState txn;
+        ComposerState cs;
+        cs.state.what = layer_state_t::eLayerChanged;
+        cs.state.surface = result.handle;
+        cs.state.z = 0x7FFFFFFE; // just below max, above all apps
+        txn.mComposerStates.push_back(cs);
+        txn.mId = static_cast<uint64_t>(surfaceNum) | (1ULL << 48);
+        self->mFlinger.setTransactionState(std::move(txn), /*applyToken=*/nullptr);
     }
 
     // Create WaylandSurface state.

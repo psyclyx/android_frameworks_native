@@ -378,6 +378,7 @@ private:
     friend class SurfaceComposerAIDL;
     friend class WaylandCompositor;
     friend class WaylandOutput;
+    friend struct WaylandSurface;
 
     // For unit tests
     friend class TestableSurfaceFlinger;

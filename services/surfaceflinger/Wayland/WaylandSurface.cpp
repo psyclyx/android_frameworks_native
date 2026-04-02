@@ -32,6 +32,7 @@
 #include <drm_fourcc.h>
 #include <inttypes.h>
 #include <gui/LayerState.h>
+#include <gui/TransactionState.h>
 #include <log/log.h>
 #include <renderengine/ExternalTexture.h>
 #include <renderengine/impl/ExternalTexture.h>
@@ -277,32 +278,24 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf) {
         return;
     }
 
-    sp<Layer> strongLayer = layer.promote();
-    if (!strongLayer) {
-        ALOGE("wl_surface.commit: layer already destroyed for surface %u", layerId);
-        return;
-    }
+    ++frameNumber;
 
-    auto& re = compositor->flinger().getRenderEngine();
-    std::shared_ptr<renderengine::ExternalTexture> texture =
-            std::make_shared<renderengine::impl::ExternalTexture>(
-                    gb, re, renderengine::impl::ExternalTexture::Usage::READABLE);
-
-    BufferData bufferData;
-    bufferData.buffer = gb;
-    bufferData.frameNumber = ++frameNumber;
-    bufferData.flags |= BufferData::BufferDataChange::frameNumberChanged;
-    bufferData.acquireFence = Fence::NO_FENCE;
-    bufferData.producerId = producerId;
-
-    nsecs_t now = systemTime(SYSTEM_TIME_MONOTONIC);
-    FrameTimelineInfo ftInfo;
-
-    strongLayer->setBuffer(texture, bufferData, now, /*desiredPresentTime=*/0,
-                           /*isAutoTimestamp=*/true, ftInfo, GameMode::Unsupported);
-
-    // Signal SF that a transaction is pending so it schedules a composite cycle.
-    compositor->scheduleComposite();
+    // Build transaction to set buffer + crop via the front-end path.
+    TransactionState txn;
+    ComposerState cs;
+    cs.state.what = layer_state_t::eBufferChanged | layer_state_t::eCropChanged;
+    cs.state.surface = handle;
+    cs.state.bufferData = std::make_shared<BufferData>();
+    cs.state.bufferData->buffer = gb;
+    cs.state.bufferData->frameNumber = frameNumber;
+    cs.state.bufferData->flags |= BufferData::BufferDataChange::frameNumberChanged;
+    cs.state.bufferData->acquireFence = Fence::NO_FENCE;
+    cs.state.bufferData->producerId = producerId;
+    cs.state.crop = FloatRect(0, 0, dmabuf->width, dmabuf->height);
+    txn.mComposerStates.push_back(std::move(cs));
+    txn.mId = (static_cast<uint64_t>(layerId) << 32) | frameNumber;
+    txn.mIsAutoTimestamp = true;
+    compositor->flinger().setTransactionState(std::move(txn), /*applyToken=*/nullptr);
 
     ALOGD("wl_surface.commit: imported %dx%d buffer (fmt=0x%08x) to layer %u, frame %" PRIu64,
           dmabuf->width, dmabuf->height, dmabuf->format, layerId, frameNumber);
@@ -363,32 +356,24 @@ void WaylandSurface::importShmBuffer(WaylandShmBuffer* shm) {
 
     gb->unlock();
 
-    sp<Layer> strongLayer = layer.promote();
-    if (!strongLayer) {
-        ALOGE("wl_surface.commit: layer already destroyed for SHM surface %u", layerId);
-        return;
-    }
+    ++frameNumber;
 
-    auto& re = compositor->flinger().getRenderEngine();
-    std::shared_ptr<renderengine::ExternalTexture> texture =
-            std::make_shared<renderengine::impl::ExternalTexture>(
-                    gb, re, renderengine::impl::ExternalTexture::Usage::READABLE);
-
-    BufferData bufferData;
-    bufferData.buffer = gb;
-    bufferData.frameNumber = ++frameNumber;
-    bufferData.flags |= BufferData::BufferDataChange::frameNumberChanged;
-    bufferData.acquireFence = Fence::NO_FENCE;
-    bufferData.producerId = producerId;
-
-    nsecs_t now = systemTime(SYSTEM_TIME_MONOTONIC);
-    FrameTimelineInfo ftInfo;
-
-    strongLayer->setBuffer(texture, bufferData, now, /*desiredPresentTime=*/0,
-                           /*isAutoTimestamp=*/true, ftInfo, GameMode::Unsupported);
-
-    // Signal SF that a transaction is pending so it schedules a composite cycle.
-    compositor->scheduleComposite();
+    // Build transaction to set buffer + crop via the front-end path.
+    TransactionState txn;
+    ComposerState cs;
+    cs.state.what = layer_state_t::eBufferChanged | layer_state_t::eCropChanged;
+    cs.state.surface = handle;
+    cs.state.bufferData = std::make_shared<BufferData>();
+    cs.state.bufferData->buffer = gb;
+    cs.state.bufferData->frameNumber = frameNumber;
+    cs.state.bufferData->flags |= BufferData::BufferDataChange::frameNumberChanged;
+    cs.state.bufferData->acquireFence = Fence::NO_FENCE;
+    cs.state.bufferData->producerId = producerId;
+    cs.state.crop = FloatRect(0, 0, shm->width, shm->height);
+    txn.mComposerStates.push_back(std::move(cs));
+    txn.mId = (static_cast<uint64_t>(layerId) << 32) | frameNumber;
+    txn.mIsAutoTimestamp = true;
+    compositor->flinger().setTransactionState(std::move(txn), /*applyToken=*/nullptr);
 
     ALOGD("wl_surface.commit: imported SHM %dx%d buffer (fmt=0x%08x) to layer %u, frame %" PRIu64,
           shm->width, shm->height, shm->format, layerId, frameNumber);
