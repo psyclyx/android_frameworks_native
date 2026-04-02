@@ -169,6 +169,7 @@
 #include "TimeStats/TimeStats.h"
 #include "TunnelModeEnabledReporter.h"
 #include "Utils/Dumper.h"
+#include "Wayland/WaylandCompositor.h"
 #include "WindowInfosListenerInvoker.h"
 
 #ifdef QCOM_UM_FAMILY
@@ -1066,6 +1067,11 @@ void SurfaceFlinger::init() FTL_FAKE_GUARD(kMainThreadContext) {
             [this]() FTL_FAKE_GUARD(kMainThreadContext) { initializeDisplays(); }));
 
     mPowerAdvisor->init();
+
+    mWaylandCompositor = WaylandCompositor::create(*this, mScheduler->getLooper());
+    if (!mWaylandCompositor) {
+        ALOGW("Wayland compositor failed to initialize");
+    }
 
     if (base::GetBoolProperty("service.sf.prime_shader_cache"s, true)) {
         constexpr const char* kWhence = "primeCache";
@@ -3328,6 +3334,15 @@ CompositeResultsPerDisplay SurfaceFlinger::composite(
                                 WorkloadTracer::COMPOSITION_TRACE_COOKIE);
     SFTRACE_NAME_FOR_TRACK(WorkloadTracer::TRACK_NAME, "Post Composition");
     SFTRACE_NAME("postComposition");
+
+    // Fire Wayland buffer releases before frame callbacks so clients see
+    // free buffers when their frame_done handler runs.
+    if (mWaylandCompositor) {
+        mWaylandCompositor->fireBufferReleases();
+        uint32_t vsyncMs = static_cast<uint32_t>(
+                pacesetterTarget.frameBeginTime().ns() / 1'000'000);
+        mWaylandCompositor->fireFrameCallbacks(vsyncMs);
+    }
 
     if (mDisplayModeController.supportsHdcp()) {
         for (const auto& [id, _] : frameTargeters) {

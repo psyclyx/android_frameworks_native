@@ -138,6 +138,7 @@ class Surface;
 class TimeStats;
 class FrameTracer;
 class ScreenCapturer;
+class WaylandCompositor;
 class WindowInfosListenerInvoker;
 
 using ::aidl::android::hardware::drm::HdcpLevels;
@@ -375,6 +376,8 @@ private:
     friend class RefreshRateOverlay;
     friend class RegionSamplingThread;
     friend class SurfaceComposerAIDL;
+    friend class WaylandCompositor;
+    friend class WaylandOutput;
 
     // For unit tests
     friend class TestableSurfaceFlinger;
@@ -1590,6 +1593,8 @@ private:
     InputWindowCommands mInputWindowCommands;
 
     std::unique_ptr<adpf::PowerAdvisor> mPowerAdvisor;
+
+    std::unique_ptr<WaylandCompositor> mWaylandCompositor;
 
     void enableRefreshRateOverlay(bool enable) REQUIRES(mStateLock, kMainThreadContext);
 

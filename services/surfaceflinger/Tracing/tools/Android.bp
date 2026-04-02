@@ -38,8 +38,13 @@ cc_binary {
     ],
     static_libs: [
         "libgtest",
+        "libffi",
+        "libwayland_server",
+        "libwayland_extension_server_protocols",
     ],
     header_libs: [
         "libsurfaceflinger_mocks_headers",
+        "libdrm_headers",
+        "minigbm_headers",
     ],
 }

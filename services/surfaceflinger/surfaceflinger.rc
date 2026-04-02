@@ -1,3 +1,6 @@
+on post-fs-data
+    mkdir /data/wayland 0755 system graphics encryption=None
+
 service surfaceflinger /system/bin/surfaceflinger
     class core animation
     user system

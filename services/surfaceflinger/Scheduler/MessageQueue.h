@@ -154,6 +154,8 @@ public:
     void scheduleImmediateFrame() override;
 
     std::optional<scheduler::ScheduleResult> getScheduledFrameResult() const override;
+
+    sp<Looper> getLooper() const { return mLooper; }
 };
 
 } // namespace impl

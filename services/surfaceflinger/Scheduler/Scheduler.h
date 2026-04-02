@@ -132,6 +132,7 @@ public:
 
     using Impl::setDuration;
 
+    using Impl::getLooper;
     using Impl::getScheduledFrameResult;
     using Impl::scheduleConfigure;
     using Impl::scheduleFrame;
