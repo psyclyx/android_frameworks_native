@@ -282,6 +282,8 @@ filegroup {
         "Wayland/WaylandCompositor.cpp",
         "Wayland/WaylandDataDevice.cpp",
         "Wayland/WaylandDmabuf.cpp",
+        "Wayland/WaylandDrm.cpp",
+        "Wayland/wayland-drm-protocol.c",
         "Wayland/WaylandOutput.cpp",
         "Wayland/WaylandSeat.cpp",
         "Wayland/WaylandShm.cpp",

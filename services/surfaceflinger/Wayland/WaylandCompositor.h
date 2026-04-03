@@ -27,6 +27,7 @@
 #include <vector>
 
 #include "WaylandDmabuf.h"
+#include "WaylandDrm.h"
 #include "WaylandOutput.h"
 #include "WaylandSeat.h"
 #include "WaylandShm.h"

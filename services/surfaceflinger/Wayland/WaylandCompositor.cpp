@@ -158,6 +158,12 @@ bool WaylandCompositor::init(const sp<Looper>& /*looper*/) {
         return false;
     }
 
+    // Register wl_drm global (Mesa EGL uses this to discover the DRM render node).
+    if (!WaylandDrm::createGlobal(mDisplay, this)) {
+        ALOGE("Failed to create wl_drm global");
+        return false;
+    }
+
     // Register xdg_wm_base global.
     if (!WaylandXdgShell::createGlobal(mDisplay, this)) {
         ALOGE("Failed to create xdg_wm_base global");

@@ -61,6 +61,10 @@ private:
     static void dmabufDestroy(struct wl_client* client, struct wl_resource* resource);
     static void dmabufCreateParams(struct wl_client* client, struct wl_resource* resource,
                                     uint32_t paramsId);
+    static void dmabufGetDefaultFeedback(struct wl_client* client, struct wl_resource* resource,
+                                          uint32_t id);
+    static void dmabufGetSurfaceFeedback(struct wl_client* client, struct wl_resource* resource,
+                                          uint32_t id, struct wl_resource* surface);
 
     static const struct zwp_linux_dmabuf_v1_interface kDmabufImpl;
 

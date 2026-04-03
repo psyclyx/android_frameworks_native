@@ -26,12 +26,17 @@
 #include <drm_fourcc.h>
 #include <linux-dmabuf-unstable-v1-server-protocol.h>
 #include <log/log.h>
+#include <linux/memfd.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <sys/syscall.h>
 #include <unistd.h>
 
 namespace android {
 
 namespace {
-constexpr uint32_t kDmabufVersion = 3;
+constexpr uint32_t kDmabufVersion = 4;
+constexpr const char* kRenderNode = "/dev/dri/renderD128";
 constexpr uint32_t kMaxPlanes = 4;
 
 // Formats we advertise. Keep minimal for MVP.
@@ -84,6 +89,8 @@ void WaylandDmabufBuffer::onBufferDestroy(struct wl_resource* resource) {
 const struct zwp_linux_dmabuf_v1_interface WaylandDmabuf::kDmabufImpl = {
         .destroy = WaylandDmabuf::dmabufDestroy,
         .create_params = WaylandDmabuf::dmabufCreateParams,
+        .get_default_feedback = WaylandDmabuf::dmabufGetDefaultFeedback,
+        .get_surface_feedback = WaylandDmabuf::dmabufGetSurfaceFeedback,
 };
 
 struct wl_global* WaylandDmabuf::createGlobal(struct wl_display* display,
@@ -104,21 +111,19 @@ void WaylandDmabuf::bind(struct wl_client* client, void* data,
     }
     wl_resource_set_implementation(resource, &kDmabufImpl, compositor, nullptr);
 
-    // Send supported formats.
-    for (const auto& fm : kSupportedFormats) {
-        // v1/v2: send format event (deprecated but required for compat)
-        zwp_linux_dmabuf_v1_send_format(resource, fm.format);
-
-        // v3+: send modifier event
-        if (ver >= 3) {
-            zwp_linux_dmabuf_v1_send_modifier(resource, fm.format,
-                                               fm.modifier >> 32,
-                                               fm.modifier & 0xFFFFFFFF);
+    // v4+: format/modifier events are deprecated; clients use get_default_feedback.
+    if (ver < 4) {
+        for (const auto& fm : kSupportedFormats) {
+            zwp_linux_dmabuf_v1_send_format(resource, fm.format);
+            if (ver >= 3) {
+                zwp_linux_dmabuf_v1_send_modifier(resource, fm.format,
+                                                   fm.modifier >> 32,
+                                                   fm.modifier & 0xFFFFFFFF);
+            }
         }
     }
 
-    ALOGI("zwp_linux_dmabuf_v1 bound (v%u), advertised %zu format-modifier pairs",
-          ver, std::size(kSupportedFormats));
+    ALOGI("zwp_linux_dmabuf_v1 bound (v%u)", ver);
 }
 
 void WaylandDmabuf::dmabufDestroy(struct wl_client* /*client*/,
@@ -310,6 +315,114 @@ void WaylandDmabuf::paramsCreateImmed(struct wl_client* client, struct wl_resour
         wl_resource_post_error(resource, ZWP_LINUX_BUFFER_PARAMS_V1_ERROR_INVALID_WL_BUFFER,
                                "failed to create buffer");
     }
+}
+
+// --- zwp_linux_dmabuf_feedback_v1 ---
+
+static void feedbackDestroy(struct wl_client* /*client*/, struct wl_resource* resource) {
+    wl_resource_destroy(resource);
+}
+
+static const struct zwp_linux_dmabuf_feedback_v1_interface kFeedbackImpl = {
+        .destroy = feedbackDestroy,
+};
+
+// Send all feedback events on a newly created feedback resource.
+static void sendFeedback(struct wl_resource* resource) {
+    // 1. Build format table: packed array of {uint32 format, uint32 pad, uint64 modifier}.
+    const size_t entrySize = 16;
+    const size_t tableSize = std::size(kSupportedFormats) * entrySize;
+    int tableFd = static_cast<int>(
+            syscall(__NR_memfd_create, "dmabuf_fmt_table", MFD_CLOEXEC | MFD_ALLOW_SEALING));
+    if (tableFd < 0) {
+        ALOGE("memfd_create failed: %s", strerror(errno));
+        return;
+    }
+    if (ftruncate(tableFd, tableSize) != 0) {
+        ALOGE("ftruncate failed: %s", strerror(errno));
+        close(tableFd);
+        return;
+    }
+    void* map = mmap(nullptr, tableSize, PROT_READ | PROT_WRITE, MAP_SHARED, tableFd, 0);
+    if (map == MAP_FAILED) {
+        ALOGE("mmap failed: %s", strerror(errno));
+        close(tableFd);
+        return;
+    }
+    uint8_t* ptr = static_cast<uint8_t*>(map);
+    for (const auto& fm : kSupportedFormats) {
+        uint32_t format = fm.format;
+        uint32_t pad = 0;
+        uint64_t modifier = fm.modifier;
+        memcpy(ptr, &format, 4);
+        memcpy(ptr + 4, &pad, 4);
+        memcpy(ptr + 8, &modifier, 8);
+        ptr += entrySize;
+    }
+    munmap(map, tableSize);
+
+    zwp_linux_dmabuf_feedback_v1_send_format_table(resource, tableFd, tableSize);
+    close(tableFd);
+
+    // 2. Get dev_t for the DRM render node.
+    struct stat st;
+    if (stat(kRenderNode, &st) != 0) {
+        ALOGE("stat(%s) failed: %s", kRenderNode, strerror(errno));
+        return;
+    }
+    dev_t dev = st.st_rdev;
+    struct wl_array devArray;
+    wl_array_init(&devArray);
+    memcpy(wl_array_add(&devArray, sizeof(dev)), &dev, sizeof(dev));
+
+    // 3. Send main_device.
+    zwp_linux_dmabuf_feedback_v1_send_main_device(resource, &devArray);
+
+    // 4. Send a single tranche.
+    zwp_linux_dmabuf_feedback_v1_send_tranche_target_device(resource, &devArray);
+
+    // Build indices array (all format table entries).
+    struct wl_array indicesArray;
+    wl_array_init(&indicesArray);
+    for (uint16_t i = 0; i < static_cast<uint16_t>(std::size(kSupportedFormats)); i++) {
+        uint16_t* slot = static_cast<uint16_t*>(wl_array_add(&indicesArray, sizeof(uint16_t)));
+        *slot = i;
+    }
+    zwp_linux_dmabuf_feedback_v1_send_tranche_formats(resource, &indicesArray);
+    wl_array_release(&indicesArray);
+
+    zwp_linux_dmabuf_feedback_v1_send_tranche_flags(resource, 0);
+    zwp_linux_dmabuf_feedback_v1_send_tranche_done(resource);
+
+    wl_array_release(&devArray);
+
+    // 5. Signal done.
+    zwp_linux_dmabuf_feedback_v1_send_done(resource);
+
+    ALOGI("Sent dmabuf feedback: device=%s, %zu format-modifier pairs",
+          kRenderNode, std::size(kSupportedFormats));
+}
+
+void WaylandDmabuf::dmabufGetDefaultFeedback(struct wl_client* client,
+                                               struct wl_resource* resource,
+                                               uint32_t id) {
+    int ver = wl_resource_get_version(resource);
+    struct wl_resource* feedback =
+            wl_resource_create(client, &zwp_linux_dmabuf_feedback_v1_interface, ver, id);
+    if (!feedback) {
+        wl_resource_post_no_memory(resource);
+        return;
+    }
+    wl_resource_set_implementation(feedback, &kFeedbackImpl, nullptr, nullptr);
+    sendFeedback(feedback);
+}
+
+void WaylandDmabuf::dmabufGetSurfaceFeedback(struct wl_client* client,
+                                               struct wl_resource* resource,
+                                               uint32_t id,
+                                               struct wl_resource* /*surface*/) {
+    // Same as default feedback for now.
+    dmabufGetDefaultFeedback(client, resource, id);
 }
 
 } // namespace android
