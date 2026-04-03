@@ -280,10 +280,12 @@ filegroup {
         "TransactionCallbackInvoker.cpp",
         "TunnelModeEnabledReporter.cpp",
         "Wayland/WaylandCompositor.cpp",
+        "Wayland/WaylandDataDevice.cpp",
         "Wayland/WaylandDmabuf.cpp",
         "Wayland/WaylandOutput.cpp",
         "Wayland/WaylandSeat.cpp",
         "Wayland/WaylandShm.cpp",
+        "Wayland/WaylandSubcompositor.cpp",
         "Wayland/WaylandSurface.cpp",
         "Wayland/WaylandXdgShell.cpp",
         "WindowInfosListenerInvoker.cpp",
@@ -340,8 +342,18 @@ cc_binary {
     shared_libs: [
         "libSurfaceFlingerProp",
     ],
+    required: [
+        "wayland-us-keymap",
+    ],
 
     logtags: ["surfaceflinger.logtags"],
+}
+
+prebuilt_etc {
+    name: "wayland-us-keymap",
+    src: "Wayland/us-keymap.xkb",
+    filename: "us-keymap.xkb",
+    relative_install_path: "wayland",
 }
 
 subdirs = [

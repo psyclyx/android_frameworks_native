@@ -3335,8 +3335,8 @@ CompositeResultsPerDisplay SurfaceFlinger::composite(
     SFTRACE_NAME_FOR_TRACK(WorkloadTracer::TRACK_NAME, "Post Composition");
     SFTRACE_NAME("postComposition");
 
-    // Fire Wayland buffer releases before frame callbacks so clients see
-    // free buffers when their frame_done handler runs.
+    // Fire Wayland buffer releases and frame callbacks. Event dispatch
+    // runs on a dedicated thread (see WaylandCompositor::init).
     if (mWaylandCompositor) {
         mWaylandCompositor->fireBufferReleases();
         uint32_t vsyncMs = static_cast<uint32_t>(

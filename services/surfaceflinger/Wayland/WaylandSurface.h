@@ -45,6 +45,11 @@ struct WaylandSurface {
     // Current committed buffer (released when replaced or surface destroyed)
     struct wl_resource* currentBuffer = nullptr;
 
+    // XDG role resources (set when xdg_surface/toplevel are created)
+    struct wl_resource* xdgSurface = nullptr;
+    struct wl_resource* xdgToplevel = nullptr;
+    uint32_t configureSerial = 0;
+
     // Pending state (applied on commit)
     struct wl_resource* pendingBuffer = nullptr;
     std::vector<struct wl_resource*> pendingFrameCallbacks;

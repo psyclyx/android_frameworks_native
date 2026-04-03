@@ -20,15 +20,30 @@
 #include <wayland-server-protocol.h>
 
 #include <cstdint>
+#include <mutex>
+#include <vector>
 
 namespace android {
 
-// Manages wl_seat global (stub). Advertises pointer + keyboard capabilities
-// but sends no input events. Enough for EGL clients that query seat but
-// don't require input to render.
+class WaylandCompositor;
+
 class WaylandSeat {
 public:
-    static struct wl_global* createGlobal(struct wl_display* display);
+    explicit WaylandSeat(WaylandCompositor* compositor);
+    ~WaylandSeat();
+
+    struct wl_global* createGlobal(struct wl_display* display);
+
+    // Set keyboard/pointer focus to a surface. nullptr = unfocus.
+    void setFocus(struct wl_resource* surface);
+
+    // Input dispatch — called from binder thread, dispatched on Wayland event loop.
+    void sendPointerMotion(uint32_t timeMs, double x, double y);
+    void sendPointerButton(uint32_t timeMs, uint32_t button, bool pressed);
+    void sendPointerAxis(uint32_t timeMs, uint32_t axis, double value);
+    void sendKey(uint32_t timeMs, uint32_t evdevKey, bool pressed);
+
+    uint32_t nextSerial();
 
 private:
     // wl_seat
@@ -41,21 +56,34 @@ private:
     static void seatGetTouch(struct wl_client* client, struct wl_resource* resource,
                               uint32_t id);
     static void seatRelease(struct wl_client* client, struct wl_resource* resource);
-
     static const struct wl_seat_interface kSeatImpl;
 
-    // wl_pointer (stub)
+    // wl_pointer
     static void pointerSetCursor(struct wl_client* client, struct wl_resource* resource,
                                   uint32_t serial, struct wl_resource* surface,
                                   int32_t hotspot_x, int32_t hotspot_y);
     static void pointerRelease(struct wl_client* client, struct wl_resource* resource);
-
     static const struct wl_pointer_interface kPointerImpl;
 
-    // wl_keyboard (stub)
+    // wl_keyboard
     static void keyboardRelease(struct wl_client* client, struct wl_resource* resource);
-
     static const struct wl_keyboard_interface kKeyboardImpl;
+
+    void sendKeymapToKeyboard(struct wl_resource* keyboard);
+
+    uint32_t mSerial = 0;
+
+    // Keymap data (created once at init, fd kept open)
+    int mKeymapFd = -1;
+    uint32_t mKeymapSize = 0;
+
+    // Tracked resources — all pointer/keyboard resources from all clients.
+    std::mutex mResourcesMutex;
+    std::vector<struct wl_resource*> mPointers;
+    std::vector<struct wl_resource*> mKeyboards;
+
+    // Currently focused surface
+    struct wl_resource* mFocusedSurface = nullptr;
 };
 
 } // namespace android

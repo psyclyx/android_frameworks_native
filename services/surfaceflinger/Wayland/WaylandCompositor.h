@@ -19,8 +19,10 @@
 #include <wayland-server-core.h>
 #include <utils/Looper.h>
 
+#include <atomic>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -45,19 +47,37 @@ public:
     WaylandCompositor& operator=(const WaylandCompositor&) = delete;
 
     SurfaceFlinger& flinger() { return mFlinger; }
+    WaylandSeat* seat() { return mSeat.get(); }
+    struct wl_display* display() { return mDisplay; }
     void removeSurface(struct wl_resource* resource);
 
     // Look up a WaylandSurface by its wl_surface resource.
     WaylandSurface* findSurface(struct wl_resource* wlSurface);
+
+    // Look up a WaylandSurface by its SF layer ID.
+    WaylandSurface* findSurfaceByLayerId(int layerId);
+
+    // Reparent a child surface layer under a parent surface layer.
+    void reparentSurfaceUnder(WaylandSurface* child, WaylandSurface* parent);
+
+    // Set position of a surface layer.
+    void setSurfacePosition(WaylandSurface* surface, int32_t x, int32_t y);
+
+    // Send xdg_toplevel configure with a new size.
+    void sendToplevelConfigure(int layerId, int32_t width, int32_t height);
 
     // Request the Android WaylandWindowService to create/destroy a window.
     void requestCreateWindow(int layerId, const sp<IBinder>& layerHandle,
                              const char* title, const char* appId,
                              int width, int height);
     void requestDestroyWindow(int layerId);
+    void reparentLayerUnderWindow(int layerId, const sp<IBinder>& windowHandle);
 
     // Queue frame callbacks to be fired after the next composite cycle.
     void queueFrameCallbacks(std::vector<struct wl_resource*>&& callbacks);
+    // Dispatch pending Wayland events. Called from SF composite cycle.
+    void dispatchEvents();
+
     // Fire all queued frame callbacks. Called from SF::composite() post-composition.
     void fireFrameCallbacks(uint32_t vsyncTimeMs);
 
@@ -72,6 +92,12 @@ public:
     // Called when a wl_buffer resource is destroyed. Clears dangling references
     // in surfaces and pending release queue to prevent use-after-free.
     void notifyBufferDestroyed(struct wl_resource* buffer);
+
+    // Input dispatch — called from binder thread.
+    // layerId identifies which Wayland surface to target.
+    void dispatchPointerMotion(int layerId, uint32_t timeMs, double x, double y);
+    void dispatchPointerButton(int layerId, uint32_t timeMs, uint32_t button, bool pressed);
+    void dispatchKey(int layerId, uint32_t timeMs, uint32_t evdevKey, bool pressed);
 
 private:
     explicit WaylandCompositor(SurfaceFlinger& flinger);
@@ -97,6 +123,8 @@ private:
     int mEventLoopFd = -1;
     uint32_t mNextSurfaceNum = 0;
 
+    std::unique_ptr<WaylandSeat> mSeat;
+
     // Keyed by wl_resource* of the wl_surface
     std::unordered_map<struct wl_resource*, std::unique_ptr<WaylandSurface>> mSurfaces;
 
@@ -106,6 +134,27 @@ private:
 
     // Buffers queued for release after composite (previous buffers replaced during commit).
     std::vector<struct wl_resource*> mPendingBufferReleases GUARDED_BY(mCallbacksMutex);
+    uint32_t mPendingVsyncTimeMs GUARDED_BY(mCallbacksMutex) = 0;
+
+    // Pending configure events (queued from binder thread, dispatched on Wayland thread).
+    // Pending events queued from other threads, dispatched on Wayland thread.
+    struct PendingEvent {
+        enum Type { Configure, PointerMotion, PointerButton, Key };
+        Type type;
+        int layerId;
+        int32_t i1, i2, i3; // generic int args
+        float f1, f2;       // generic float args
+        bool b1;
+    };
+    std::vector<PendingEvent> mPendingEvents GUARDED_BY(mCallbacksMutex);
+
+    // Background dispatch thread for Wayland protocol events.
+    std::thread mDispatchThread;
+    std::atomic<bool> mDispatchStop{false};
+    int mWakeEventFd = -1;
+
+    // Actually fire frame callbacks/releases (called on Wayland thread).
+    void doFireFrameCallbacksAndReleases();
 };
 
 } // namespace android

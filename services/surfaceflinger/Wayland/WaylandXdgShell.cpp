@@ -98,6 +98,13 @@ void WaylandXdgShell::wmBaseGetXdgSurface(struct wl_client* client,
 
     wl_resource_set_implementation(xdgSurfaceResource, &kXdgSurfaceImpl,
                                    xdgSurface, onXdgSurfaceDestroy);
+
+    // Store xdg_surface reference on the WaylandSurface for configure events.
+    WaylandSurface* ws = compositor->findSurface(surface);
+    if (ws) {
+        ws->xdgSurface = xdgSurfaceResource;
+    }
+
     ALOGI("xdg_surface created for wl_surface %p", surface);
 }
 
@@ -153,6 +160,12 @@ void WaylandXdgShell::xdgSurfaceGetToplevel(struct wl_client* client,
 
     xdgSurface->toplevel = toplevel;
     wl_resource_set_implementation(toplevel, &kToplevelImpl, xdgSurface, nullptr);
+
+    // Store toplevel reference on the WaylandSurface.
+    WaylandSurface* ws2 = xdgSurface->compositor->findSurface(xdgSurface->wlSurface);
+    if (ws2) {
+        ws2->xdgToplevel = toplevel;
+    }
 
     // Send initial configure sequence: toplevel.configure → xdg_surface.configure
     sendToplevelConfigure(toplevel, resource);
@@ -295,10 +308,14 @@ void WaylandXdgShell::sendToplevelConfigure(struct wl_resource* toplevel,
                                              struct wl_resource* xdgSurface) {
     auto* surface = static_cast<WaylandXdgSurface*>(wl_resource_get_user_data(xdgSurface));
 
-    // Send xdg_toplevel.configure with width=0, height=0 (client chooses size).
-    // States array: empty (no maximized/fullscreen/etc).
+    // Send xdg_toplevel.configure with the display size so the client
+    // fills the screen. Use ACTIVATED state so client knows it has focus.
     struct wl_array states;
     wl_array_init(&states);
+    uint32_t* activated = static_cast<uint32_t*>(wl_array_add(&states, sizeof(uint32_t)));
+    *activated = XDG_TOPLEVEL_STATE_ACTIVATED;
+    // Use display dimensions as default. The actual window size will be
+    // sent via a follow-up configure when the Activity is ready.
     xdg_toplevel_send_configure(toplevel, 0, 0, &states);
     wl_array_release(&states);
 
