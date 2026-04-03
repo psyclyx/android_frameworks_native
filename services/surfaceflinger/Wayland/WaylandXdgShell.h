@@ -20,6 +20,7 @@
 #include <xdg-shell-server-protocol.h>
 
 #include <cstdint>
+#include <string>
 
 namespace android {
 
@@ -32,6 +33,8 @@ struct WaylandXdgSurface {
     struct wl_resource* wlSurface = nullptr;    // underlying wl_surface
     struct wl_resource* toplevel = nullptr;      // xdg_toplevel (if role assigned)
     uint32_t pendingConfigureSerial = 0;
+    std::string title;
+    std::string appId;
 };
 
 // Manages xdg_wm_base global, xdg_surface, and xdg_toplevel.

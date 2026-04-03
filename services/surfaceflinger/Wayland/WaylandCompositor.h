@@ -47,6 +47,15 @@ public:
     SurfaceFlinger& flinger() { return mFlinger; }
     void removeSurface(struct wl_resource* resource);
 
+    // Look up a WaylandSurface by its wl_surface resource.
+    WaylandSurface* findSurface(struct wl_resource* wlSurface);
+
+    // Request the Android WaylandWindowService to create/destroy a window.
+    void requestCreateWindow(int layerId, const sp<IBinder>& layerHandle,
+                             const char* title, const char* appId,
+                             int width, int height);
+    void requestDestroyWindow(int layerId);
+
     // Queue frame callbacks to be fired after the next composite cycle.
     void queueFrameCallbacks(std::vector<struct wl_resource*>&& callbacks);
     // Fire all queued frame callbacks. Called from SF::composite() post-composition.
