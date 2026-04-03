@@ -122,6 +122,7 @@ private:
     static const struct wl_compositor_interface kCompositorImpl;
 
     SurfaceFlinger& mFlinger;
+    struct wl_listener mClientCreatedListener = {};
     struct wl_display* mDisplay = nullptr;
     struct wl_event_loop* mEventLoop = nullptr;
     int mEventLoopFd = -1;

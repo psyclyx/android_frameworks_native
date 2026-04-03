@@ -338,6 +338,20 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf) {
 }
 
 void WaylandSurface::importShmBuffer(WaylandShmBuffer* shm) {
+    if (!shm->pool || !shm->pool->data) {
+        ALOGE("wl_surface.commit: SHM buffer has no pool or pool data");
+        return;
+    }
+
+    // Validate buffer bounds against the pool.
+    int64_t needed = static_cast<int64_t>(shm->offset) +
+                     static_cast<int64_t>(shm->stride) * shm->height;
+    if (needed > shm->pool->size) {
+        ALOGE("wl_surface.commit: SHM buffer exceeds pool: need %" PRId64 " have %d",
+              needed, shm->pool->size);
+        return;
+    }
+
     const void* pixels = shm->pixelData();
     if (!pixels) {
         ALOGE("wl_surface.commit: SHM buffer has null pixel data");
@@ -347,6 +361,7 @@ void WaylandSurface::importShmBuffer(WaylandShmBuffer* shm) {
     PixelFormat pixFmt = shmToPixelFormat(shm->format);
     const uint32_t srcStride = static_cast<uint32_t>(shm->stride);
     const uint32_t h = static_cast<uint32_t>(shm->height);
+
 
     // Snapshot the pixel data from the SHM pool. This is a fast memcpy that
     // doesn't touch gralloc, so it's safe on the Wayland dispatch thread.

@@ -77,6 +77,7 @@ void WaylandShmPool::poolCreateBuffer(struct wl_client* client, struct wl_resour
     buf->bufferType = WaylandBufferType::Shm;
     buf->compositor = pool->compositor;
     buf->pool = pool;
+    pool->ref(); // buffer holds a reference to keep the pool alive
     buf->offset = offset;
     buf->width = width;
     buf->height = height;
@@ -112,16 +113,22 @@ void WaylandShmPool::poolResize(struct wl_client* /*client*/, struct wl_resource
     pool->size = size;
 }
 
+void WaylandShmPool::unref() {
+    if (--refCount <= 0) {
+        if (data && data != MAP_FAILED) {
+            munmap(data, static_cast<size_t>(size));
+        }
+        if (fd >= 0) {
+            close(fd);
+        }
+        delete this;
+    }
+}
+
 void WaylandShmPool::onPoolDestroy(struct wl_resource* resource) {
     auto* pool = static_cast<WaylandShmPool*>(wl_resource_get_user_data(resource));
     if (pool) {
-        if (pool->data && pool->data != MAP_FAILED) {
-            munmap(pool->data, static_cast<size_t>(pool->size));
-        }
-        if (pool->fd >= 0) {
-            close(pool->fd);
-        }
-        delete pool;
+        pool->unref(); // drop the pool resource's reference
     }
 }
 
@@ -140,6 +147,9 @@ void WaylandShmBuffer::onBufferDestroy(struct wl_resource* resource) {
     if (buf) {
         if (buf->compositor) {
             buf->compositor->notifyBufferDestroyed(resource);
+        }
+        if (buf->pool) {
+            buf->pool->unref(); // release pool reference held by this buffer
         }
         delete buf;
     }

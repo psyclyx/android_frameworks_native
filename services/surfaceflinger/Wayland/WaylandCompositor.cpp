@@ -20,6 +20,7 @@
 #include "WaylandCompositor.h"
 
 #include <algorithm>
+#include <cstdarg>
 #include <errno.h>
 #include <poll.h>
 #include <sys/eventfd.h>
@@ -55,6 +56,28 @@ namespace {
 constexpr const char* kSocketDir = "/data/wayland";
 constexpr const char* kSocketName = "wayland-0";
 constexpr uint32_t kCompositorVersion = 4; // wl_surface up to damage_buffer (v4)
+
+// Forward libwayland server-side log messages to Android logcat.
+// This captures protocol errors that libwayland generates before disconnecting clients.
+void waylandLogHandler(const char* fmt, va_list args) {
+    char buf[512];
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    ALOGE("libwayland: %s", buf);
+}
+
+// Listener attached to each client to log when they disconnect.
+struct ClientDestroyData {
+    struct wl_listener listener;
+    pid_t pid;
+};
+
+void onClientDestroy(struct wl_listener* listener, void* /*data*/) {
+    ClientDestroyData* d;
+    d = wl_container_of(listener, d, listener);
+    ALOGI("Wayland client pid=%d disconnected", d->pid);
+    wl_list_remove(&d->listener.link);
+    delete d;
+}
 
 bool ensureSocketDir() {
     struct stat st;
@@ -92,7 +115,19 @@ const struct wl_compositor_interface WaylandCompositor::kCompositorImpl = {
 };
 
 WaylandCompositor::WaylandCompositor(SurfaceFlinger& flinger)
-      : mFlinger(flinger) {}
+      : mFlinger(flinger) {
+    mClientCreatedListener.notify = [](struct wl_listener* /*listener*/, void* data) {
+        auto* client = static_cast<struct wl_client*>(data);
+        pid_t pid;
+        wl_client_get_credentials(client, &pid, nullptr, nullptr);
+        ALOGI("Wayland client connected: pid=%d", pid);
+
+        auto* d = new ClientDestroyData();
+        d->pid = pid;
+        d->listener.notify = onClientDestroy;
+        wl_client_add_destroy_listener(client, &d->listener);
+    };
+}
 
 WaylandCompositor::~WaylandCompositor() {
     mDispatchStop = true;
@@ -130,11 +165,17 @@ bool WaylandCompositor::init(const sp<Looper>& /*looper*/) {
         return false;
     }
 
+    // Capture libwayland protocol errors in logcat.
+    wl_log_set_handler_server(waylandLogHandler);
+
     mDisplay = wl_display_create();
     if (!mDisplay) {
         ALOGE("wl_display_create failed");
         return false;
     }
+
+    // Log when new clients connect and attach a destroy listener.
+    wl_display_add_client_created_listener(mDisplay, &mClientCreatedListener);
 
     // Remove any stale socket before binding.
     std::string socketPath = std::string(kSocketDir) + "/" + kSocketName;

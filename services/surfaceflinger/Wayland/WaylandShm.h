@@ -33,11 +33,17 @@ struct WaylandBufferBase {
 };
 
 // Per-pool state for wl_shm_pool (mmap'd shared memory region).
+// Reference-counted: the mmap and fd stay alive as long as any buffer
+// created from this pool exists, per the Wayland wl_shm_pool spec.
 struct WaylandShmPool {
     WaylandCompositor* compositor = nullptr;
     void* data = nullptr;   // mmap'd region
     int32_t size = 0;
     int fd = -1;
+    int refCount = 1;       // starts at 1 for the pool resource itself
+
+    void ref() { ++refCount; }
+    void unref();
 
     static void poolDestroy(struct wl_client* client, struct wl_resource* resource);
     static void poolCreateBuffer(struct wl_client* client, struct wl_resource* resource,
