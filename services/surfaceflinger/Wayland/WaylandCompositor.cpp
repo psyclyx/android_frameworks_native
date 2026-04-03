@@ -102,6 +102,11 @@ WaylandCompositor::~WaylandCompositor() {
     if (mDispatchThread.joinable()) {
         mDispatchThread.join();
     }
+    // Wake and join the buffer thread.
+    mBufferCv.notify_all();
+    if (mBufferThread.joinable()) {
+        mBufferThread.join();
+    }
     mSurfaces.clear();
     if (mWakeEventFd >= 0) {
         close(mWakeEventFd);
@@ -234,6 +239,10 @@ bool WaylandCompositor::init(const sp<Looper>& /*looper*/) {
             wl_event_loop_dispatch(mEventLoop, 16);
         }
     });
+
+    // Buffer submission thread — handles gralloc alloc + setTransactionState
+    // off the Wayland dispatch thread to avoid deadlocking with SF or Vulkan WSI.
+    mBufferThread = std::thread([this]() { bufferThreadLoop(); });
 
     ALOGI("Wayland compositor listening on %s (wl_compositor v%u)", socketPath.c_str(),
           kCompositorVersion);
@@ -723,8 +732,15 @@ void WaylandCompositor::doFireFrameCallbacksAndReleases() {
                 *s = 4; // XDG_TOPLEVEL_STATE_ACTIVATED
                 xdg_toplevel_send_configure(ws->xdgToplevel, ev.i1, ev.i2, &states);
                 wl_array_release(&states);
-                ws->configureSerial++;
-                xdg_surface_send_configure(ws->xdgSurface, ws->configureSerial);
+                // Use the xdg_surface's serial counter (same one used for initial configure)
+                // to avoid duplicate serials which violate the xdg_surface protocol.
+                auto* xdgSurf = static_cast<WaylandXdgSurface*>(
+                        wl_resource_get_user_data(ws->xdgSurface));
+                if (xdgSurf) {
+                    xdgSurf->pendingConfigureSerial++;
+                    xdg_surface_send_configure(ws->xdgSurface,
+                                               xdgSurf->pendingConfigureSerial);
+                }
                 ALOGI("Sent toplevel configure %dx%d for layer %d", ev.i1, ev.i2, ev.layerId);
                 break;
             }
@@ -775,6 +791,93 @@ void WaylandCompositor::notifyBufferDestroyed(struct wl_resource* buffer) {
         std::lock_guard<std::mutex> lock(mCallbacksMutex);
         auto it = std::remove(mPendingBufferReleases.begin(), mPendingBufferReleases.end(), buffer);
         mPendingBufferReleases.erase(it, mPendingBufferReleases.end());
+    }
+}
+
+void WaylandCompositor::postBufferWork(BufferWork&& work) {
+    {
+        std::lock_guard<std::mutex> lock(mBufferMutex);
+        mBufferQueue.push_back(std::move(work));
+    }
+    mBufferCv.notify_one();
+}
+
+void WaylandCompositor::bufferThreadLoop() {
+    while (!mDispatchStop) {
+        std::vector<BufferWork> work;
+        {
+            std::unique_lock<std::mutex> lock(mBufferMutex);
+            mBufferCv.wait(lock, [this]() REQUIRES(mBufferMutex) {
+                return mDispatchStop.load() || !mBufferQueue.empty();
+            });
+            if (mDispatchStop.load() && mBufferQueue.empty()) break;
+            work.swap(mBufferQueue);
+        }
+
+        for (auto& item : work) {
+            sp<GraphicBuffer> gb = item.gb;
+
+            // If we have raw pixel data, do the gralloc alloc + copy here
+            // (off the Wayland dispatch thread).
+            if (!item.pixels.empty() && !gb) {
+                gb = sp<GraphicBuffer>::make(
+                        static_cast<uint32_t>(item.width),
+                        static_cast<uint32_t>(item.height),
+                        item.pixFmt, 1u,
+                        static_cast<uint64_t>(GRALLOC_USAGE_SW_WRITE_OFTEN |
+                                              GRALLOC_USAGE_HW_TEXTURE |
+                                              GRALLOC_USAGE_HW_COMPOSER),
+                        "WaylandShm");
+                if (gb->initCheck() != NO_ERROR) {
+                    ALOGE("BufferThread: GraphicBuffer alloc failed");
+                    continue;
+                }
+                void* dst = nullptr;
+                if (gb->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, &dst) != NO_ERROR || !dst) {
+                    ALOGE("BufferThread: GraphicBuffer lock failed");
+                    continue;
+                }
+                const uint32_t bpp = bytesPerPixel(item.pixFmt);
+                const uint8_t* src = item.pixels.data();
+                uint8_t* dstBytes = static_cast<uint8_t*>(dst);
+                const uint32_t dstStride = gb->getStride() * bpp;
+                const uint32_t w = static_cast<uint32_t>(item.width);
+                const uint32_t h = static_cast<uint32_t>(item.height);
+                for (uint32_t y = 0; y < h; y++) {
+                    const uint32_t* srcRow =
+                            reinterpret_cast<const uint32_t*>(src + y * item.srcStride);
+                    uint32_t* dstRow =
+                            reinterpret_cast<uint32_t*>(dstBytes + y * dstStride);
+                    for (uint32_t x = 0; x < w; x++) {
+                        uint32_t px = srcRow[x];
+                        uint32_t b = (px >> 0) & 0xFF;
+                        uint32_t g = (px >> 8) & 0xFF;
+                        uint32_t r = (px >> 16) & 0xFF;
+                        uint32_t a = (px >> 24) & 0xFF;
+                        dstRow[x] = (a << 24) | (b << 16) | (g << 8) | r;
+                    }
+                }
+                gb->unlock();
+            }
+
+            if (!gb) continue;
+
+            TransactionState txn;
+            ComposerState cs;
+            cs.state.what = layer_state_t::eBufferChanged | layer_state_t::eCropChanged;
+            cs.state.surface = item.handle;
+            cs.state.bufferData = std::make_shared<BufferData>();
+            cs.state.bufferData->buffer = gb;
+            cs.state.bufferData->frameNumber = item.frameNumber;
+            cs.state.bufferData->flags |= BufferData::BufferDataChange::frameNumberChanged;
+            cs.state.bufferData->acquireFence = Fence::NO_FENCE;
+            cs.state.bufferData->producerId = item.producerId;
+            cs.state.crop = FloatRect(0, 0, item.width, item.height);
+            txn.mComposerStates.push_back(std::move(cs));
+            txn.mId = (static_cast<uint64_t>(item.layerId) << 32) | item.frameNumber;
+            txn.mIsAutoTimestamp = true;
+            mFlinger.setTransactionState(std::move(txn), /*applyToken=*/nullptr);
+        }
     }
 }
 

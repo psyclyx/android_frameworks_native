@@ -20,11 +20,14 @@
 #include <utils/Looper.h>
 
 #include <atomic>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
 #include <vector>
+
+#include <ui/GraphicBuffer.h>
 
 #include "WaylandDmabuf.h"
 #include "WaylandDrm.h"
@@ -156,6 +159,31 @@ private:
 
     // Actually fire frame callbacks/releases (called on Wayland thread).
     void doFireFrameCallbacksAndReleases();
+
+    // --- Buffer submission thread ---
+    // Buffer imports (gralloc alloc + pixel copy + setTransactionState) are posted
+    // to a dedicated thread to avoid blocking the Wayland dispatch thread, which
+    // would cause deadlocks with Vulkan WSI clients that do nested event dispatch.
+public:
+    struct BufferWork {
+        sp<IBinder> handle;
+        sp<GraphicBuffer> gb; // pre-built GraphicBuffer (dmabuf path)
+        std::vector<uint8_t> pixels; // raw pixel data (SHM path, empty for dmabuf)
+        PixelFormat pixFmt;
+        uint32_t srcStride;
+        uint64_t frameNumber;
+        uint32_t producerId;
+        uint32_t layerId;
+        int32_t width;
+        int32_t height;
+    };
+    void postBufferWork(BufferWork&& work);
+private:
+    std::thread mBufferThread;
+    std::mutex mBufferMutex;
+    std::condition_variable mBufferCv;
+    std::vector<BufferWork> mBufferQueue; // protected by mBufferMutex
+    void bufferThreadLoop();
 };
 
 } // namespace android

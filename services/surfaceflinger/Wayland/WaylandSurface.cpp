@@ -321,22 +321,17 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf) {
 
     ++frameNumber;
 
-    // Build transaction to set buffer + crop via the front-end path.
-    TransactionState txn;
-    ComposerState cs;
-    cs.state.what = layer_state_t::eBufferChanged | layer_state_t::eCropChanged;
-    cs.state.surface = handle;
-    cs.state.bufferData = std::make_shared<BufferData>();
-    cs.state.bufferData->buffer = gb;
-    cs.state.bufferData->frameNumber = frameNumber;
-    cs.state.bufferData->flags |= BufferData::BufferDataChange::frameNumberChanged;
-    cs.state.bufferData->acquireFence = Fence::NO_FENCE;
-    cs.state.bufferData->producerId = producerId;
-    cs.state.crop = FloatRect(0, 0, dmabuf->width, dmabuf->height);
-    txn.mComposerStates.push_back(std::move(cs));
-    txn.mId = (static_cast<uint64_t>(layerId) << 32) | frameNumber;
-    txn.mIsAutoTimestamp = true;
-    compositor->flinger().setTransactionState(std::move(txn), /*applyToken=*/nullptr);
+    // Post the SF transaction to a dedicated buffer thread to avoid blocking
+    // the Wayland dispatch thread.
+    WaylandCompositor::BufferWork bw;
+    bw.handle = handle;
+    bw.gb = gb;
+    bw.frameNumber = frameNumber;
+    bw.producerId = producerId;
+    bw.layerId = layerId;
+    bw.width = dmabuf->width;
+    bw.height = dmabuf->height;
+    compositor->postBufferWork(std::move(bw));
 
     ALOGD("wl_surface.commit: imported %dx%d buffer (fmt=0x%08x) to layer %u, frame %" PRIu64,
           dmabuf->width, dmabuf->height, dmabuf->format, layerId, frameNumber);
@@ -350,73 +345,32 @@ void WaylandSurface::importShmBuffer(WaylandShmBuffer* shm) {
     }
 
     PixelFormat pixFmt = shmToPixelFormat(shm->format);
-
-    sp<GraphicBuffer> gb = sp<GraphicBuffer>::make(
-            static_cast<uint32_t>(shm->width), static_cast<uint32_t>(shm->height), pixFmt,
-            1u /* layerCount */,
-            static_cast<uint64_t>(GRALLOC_USAGE_SW_WRITE_OFTEN | GRALLOC_USAGE_HW_TEXTURE |
-                                  GRALLOC_USAGE_HW_COMPOSER),
-            "WaylandShm");
-
-    status_t err = gb->initCheck();
-    if (err != NO_ERROR) {
-        ALOGE("GraphicBuffer alloc failed for SHM buffer: %d (%s)", err, strerror(-err));
-        return;
-    }
-
-    void* dst = nullptr;
-    err = gb->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, &dst);
-    if (err != NO_ERROR || !dst) {
-        ALOGE("GraphicBuffer lock failed: %d (%s)", err, strerror(-err));
-        return;
-    }
-
-    // Copy with BGRA→RGBA swizzle (Wayland ARGB8888 is BGRA in memory;
-    // we allocated RGBA_8888 for Skia/SwiftShader compatibility).
-    const uint32_t bpp = bytesPerPixel(pixFmt);
-    const uint8_t* src = static_cast<const uint8_t*>(pixels);
-    uint8_t* dstBytes = static_cast<uint8_t*>(dst);
-    const uint32_t dstStride = gb->getStride() * bpp;
     const uint32_t srcStride = static_cast<uint32_t>(shm->stride);
-    const uint32_t w = static_cast<uint32_t>(shm->width);
     const uint32_t h = static_cast<uint32_t>(shm->height);
 
-    for (uint32_t y = 0; y < h; y++) {
-        const uint32_t* srcRow = reinterpret_cast<const uint32_t*>(src + y * srcStride);
-        uint32_t* dstRow = reinterpret_cast<uint32_t*>(dstBytes + y * dstStride);
-        for (uint32_t x = 0; x < w; x++) {
-            uint32_t px = srcRow[x]; // BGRA byte order (Wayland ARGB8888)
-            // Swap R and B: BGRA → RGBA
-            uint32_t b = (px >> 0) & 0xFF;
-            uint32_t g = (px >> 8) & 0xFF;
-            uint32_t r = (px >> 16) & 0xFF;
-            uint32_t a = (px >> 24) & 0xFF;
-            dstRow[x] = (a << 24) | (b << 16) | (g << 8) | r;
-        }
-    }
-
-    gb->unlock();
+    // Snapshot the pixel data from the SHM pool. This is a fast memcpy that
+    // doesn't touch gralloc, so it's safe on the Wayland dispatch thread.
+    // The heavy work (gralloc alloc + swizzle + setTransactionState) happens
+    // on the buffer thread to avoid deadlocking with Vulkan WSI clients.
+    const size_t dataSize = static_cast<size_t>(srcStride) * h;
+    std::vector<uint8_t> pixelCopy(dataSize);
+    memcpy(pixelCopy.data(), pixels, dataSize);
 
     ++frameNumber;
 
-    // Build transaction to set buffer + crop via the front-end path.
-    TransactionState txn;
-    ComposerState cs;
-    cs.state.what = layer_state_t::eBufferChanged | layer_state_t::eCropChanged;
-    cs.state.surface = handle;
-    cs.state.bufferData = std::make_shared<BufferData>();
-    cs.state.bufferData->buffer = gb;
-    cs.state.bufferData->frameNumber = frameNumber;
-    cs.state.bufferData->flags |= BufferData::BufferDataChange::frameNumberChanged;
-    cs.state.bufferData->acquireFence = Fence::NO_FENCE;
-    cs.state.bufferData->producerId = producerId;
-    cs.state.crop = FloatRect(0, 0, shm->width, shm->height);
-    txn.mComposerStates.push_back(std::move(cs));
-    txn.mId = (static_cast<uint64_t>(layerId) << 32) | frameNumber;
-    txn.mIsAutoTimestamp = true;
-    compositor->flinger().setTransactionState(std::move(txn), /*applyToken=*/nullptr);
+    WaylandCompositor::BufferWork work;
+    work.handle = handle;
+    work.pixels = std::move(pixelCopy);
+    work.pixFmt = pixFmt;
+    work.srcStride = srcStride;
+    work.frameNumber = frameNumber;
+    work.producerId = producerId;
+    work.layerId = layerId;
+    work.width = shm->width;
+    work.height = shm->height;
+    compositor->postBufferWork(std::move(work));
 
-    ALOGD("wl_surface.commit: imported SHM %dx%d buffer (fmt=0x%08x) to layer %u, frame %" PRIu64,
+    ALOGD("wl_surface.commit: queued SHM %dx%d buffer (fmt=0x%08x) to layer %u, frame %" PRIu64,
           shm->width, shm->height, shm->format, layerId, frameNumber);
 }
 
