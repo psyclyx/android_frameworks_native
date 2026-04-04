@@ -23,7 +23,10 @@
 #include <utils/StrongPointer.h>
 
 #include <cstdint>
+#include <unordered_map>
 #include <vector>
+
+#include <ui/GraphicBuffer.h>
 
 namespace android {
 
@@ -44,6 +47,10 @@ struct WaylandSurface {
 
     // Current committed buffer (released when replaced or surface destroyed)
     struct wl_resource* currentBuffer = nullptr;
+
+    // Cache of imported GraphicBuffers keyed by dmabuf fd inode.
+    // Vulkan swapchains reuse the same 4 dmabuf fds, so we import once and reuse.
+    std::unordered_map<uint64_t, sp<GraphicBuffer>> importedBuffers;
 
     // XDG role resources (set when xdg_surface/toplevel are created)
     struct wl_resource* xdgSurface = nullptr;

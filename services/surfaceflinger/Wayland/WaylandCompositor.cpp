@@ -17,13 +17,20 @@
 #undef LOG_TAG
 #define LOG_TAG "WaylandCompositor"
 
+// Uncomment to apply colored stripe overlays on CPU-copied buffers.
+// Red horizontal stripes = SHM path (BGRA→RGBA swizzle copy).
+// Each stripe is 8px tall, 50% opacity blend.
+#define WAYLAND_DEBUG_CPU_COPY_TINT 1
+
 #include "WaylandCompositor.h"
 
 #include <algorithm>
 #include <cstdarg>
 #include <errno.h>
+#include <linux/dma-buf.h>
 #include <poll.h>
 #include <sys/eventfd.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -50,6 +57,7 @@
 namespace android {
 
 using gui::ISurfaceComposerClient;
+
 
 namespace {
 
@@ -739,21 +747,25 @@ void WaylandCompositor::fireBufferReleases() {
 
 void WaylandCompositor::doFireFrameCallbacksAndReleases() {
     std::vector<struct wl_resource*> callbacks;
-    std::vector<struct wl_resource*> buffers;
+    std::vector<struct wl_resource*> releasable;
     std::vector<PendingEvent> events;
     uint32_t vsyncMs;
     {
         std::lock_guard<std::mutex> lock(mCallbacksMutex);
         callbacks = std::move(mPendingFrameCallbacks);
         mPendingFrameCallbacks.clear();
-        buffers = std::move(mPendingBufferReleases);
+        // Two-stage release: release buffers that have been waiting since
+        // the previous composite, then promote newly-pending to ready.
+        releasable = std::move(mReadyBufferReleases);
+        mReadyBufferReleases.clear();
+        mReadyBufferReleases = std::move(mPendingBufferReleases);
         mPendingBufferReleases.clear();
         events = std::move(mPendingEvents);
         mPendingEvents.clear();
         vsyncMs = mPendingVsyncTimeMs;
     }
 
-    for (auto* buf : buffers) {
+    for (auto* buf : releasable) {
         wl_buffer_send_release(buf);
     }
     for (auto* cb : callbacks) {
@@ -826,12 +838,13 @@ void WaylandCompositor::notifyBufferDestroyed(struct wl_resource* buffer) {
         }
     }
 
-    // Remove from pending release queue (under lock since fireBufferReleases
-    // may be called from the SF composite thread).
+    // Remove from both release queues.
     {
         std::lock_guard<std::mutex> lock(mCallbacksMutex);
         auto it = std::remove(mPendingBufferReleases.begin(), mPendingBufferReleases.end(), buffer);
         mPendingBufferReleases.erase(it, mPendingBufferReleases.end());
+        auto it2 = std::remove(mReadyBufferReleases.begin(), mReadyBufferReleases.end(), buffer);
+        mReadyBufferReleases.erase(it2, mReadyBufferReleases.end());
     }
 }
 
@@ -857,14 +870,12 @@ void WaylandCompositor::bufferThreadLoop() {
 
         for (auto& item : work) {
             sp<GraphicBuffer> gb = item.gb;
+            const uint32_t w = static_cast<uint32_t>(item.width);
+            const uint32_t h = static_cast<uint32_t>(item.height);
 
-            // If we have raw pixel data, do the gralloc alloc + copy here
-            // (off the Wayland dispatch thread).
+            // --- SHM path: BGRA→RGBA swizzle copy ---
             if (!item.pixels.empty() && !gb) {
-                gb = sp<GraphicBuffer>::make(
-                        static_cast<uint32_t>(item.width),
-                        static_cast<uint32_t>(item.height),
-                        item.pixFmt, 1u,
+                gb = sp<GraphicBuffer>::make(w, h, item.pixFmt, 1u,
                         static_cast<uint64_t>(GRALLOC_USAGE_SW_WRITE_OFTEN |
                                               GRALLOC_USAGE_HW_TEXTURE |
                                               GRALLOC_USAGE_HW_COMPOSER),
@@ -882,8 +893,6 @@ void WaylandCompositor::bufferThreadLoop() {
                 const uint8_t* src = item.pixels.data();
                 uint8_t* dstBytes = static_cast<uint8_t*>(dst);
                 const uint32_t dstStride = gb->getStride() * bpp;
-                const uint32_t w = static_cast<uint32_t>(item.width);
-                const uint32_t h = static_cast<uint32_t>(item.height);
                 for (uint32_t y = 0; y < h; y++) {
                     const uint32_t* srcRow =
                             reinterpret_cast<const uint32_t*>(src + y * item.srcStride);
@@ -895,6 +904,14 @@ void WaylandCompositor::bufferThreadLoop() {
                         uint32_t g = (px >> 8) & 0xFF;
                         uint32_t r = (px >> 16) & 0xFF;
                         uint32_t a = (px >> 24) & 0xFF;
+#if WAYLAND_DEBUG_CPU_COPY_TINT
+                        // Red horizontal stripes (8px period) = SHM swizzle path
+                        if ((y / 8) & 1) {
+                            r = (r + 255) / 2;
+                            g = g / 2;
+                            b = b / 2;
+                        }
+#endif
                         dstRow[x] = (a << 24) | (b << 16) | (g << 8) | r;
                     }
                 }
@@ -902,6 +919,24 @@ void WaylandCompositor::bufferThreadLoop() {
             }
 
             if (!gb) continue;
+
+            sp<Fence> acquireFence = Fence::NO_FENCE;
+            if (item.dmabufFd >= 0) {
+                struct dma_buf_export_sync_file exportSync = {};
+                exportSync.flags = DMA_BUF_SYNC_READ;
+                exportSync.fd = -1;
+                if (ioctl(item.dmabufFd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &exportSync) == 0 &&
+                    exportSync.fd >= 0) {
+                    acquireFence = sp<Fence>::make(exportSync.fd);
+                    ALOGD("BufferThread: got GPU fence fd=%d for layer %u",
+                          exportSync.fd, item.layerId);
+                } else {
+                    ALOGW("BufferThread: DMA_BUF_IOCTL_EXPORT_SYNC_FILE failed: %s",
+                          strerror(errno));
+                }
+                close(item.dmabufFd);
+                item.dmabufFd = -1;
+            }
 
             TransactionState txn;
             ComposerState cs;
@@ -911,13 +946,16 @@ void WaylandCompositor::bufferThreadLoop() {
             cs.state.bufferData->buffer = gb;
             cs.state.bufferData->frameNumber = item.frameNumber;
             cs.state.bufferData->flags |= BufferData::BufferDataChange::frameNumberChanged;
-            cs.state.bufferData->acquireFence = Fence::NO_FENCE;
+            cs.state.bufferData->acquireFence = std::move(acquireFence);
             cs.state.bufferData->producerId = item.producerId;
             cs.state.crop = FloatRect(0, 0, item.width, item.height);
             txn.mComposerStates.push_back(std::move(cs));
             txn.mId = (static_cast<uint64_t>(item.layerId) << 32) | item.frameNumber;
             txn.mIsAutoTimestamp = true;
             mFlinger.setTransactionState(std::move(txn), /*applyToken=*/nullptr);
+
+            ALOGD("BufferThread: submitting %dx%d buffer to layer %u frame %" PRIu64,
+                  item.width, item.height, item.layerId, item.frameNumber);
         }
     }
 }

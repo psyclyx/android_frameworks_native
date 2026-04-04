@@ -17,6 +17,11 @@
 #undef LOG_TAG
 #define LOG_TAG "WaylandSurface"
 
+// Uncomment to apply colored stripe overlays on CPU-copied buffers.
+// Blue vertical stripes = dmabuf mmap+copy fallback path.
+// Each stripe is 8px wide, 50% opacity blend.
+#define WAYLAND_DEBUG_CPU_COPY_TINT 1
+
 #include "WaylandSurface.h"
 #include "WaylandCompositor.h"
 #include "WaylandDmabuf.h"
@@ -28,17 +33,21 @@
 #include <atomic>
 #include <cstring>
 #include <sys/mman.h>
+#include <sys/stat.h>
 
 #include <android/gui/FrameTimelineInfo.h>
 #include <drm_fourcc.h>
 #include <inttypes.h>
 #include <gui/LayerState.h>
 #include <gui/TransactionState.h>
+#include <linux/memfd.h>
 #include <log/log.h>
 #include <renderengine/ExternalTexture.h>
 #include <renderengine/impl/ExternalTexture.h>
+#include <sys/syscall.h>
 #include <ui/Fence.h>
 #include <ui/GraphicBuffer.h>
+#include <ui/GraphicBufferMapper.h>
 #include <utils/Timers.h>
 #include <cros_gralloc/cros_gralloc_handle.h>
 #include <cutils/native_handle.h>
@@ -49,6 +58,11 @@
 constexpr uint64_t kBoUseScanout = 1ull << 0;   // BO_USE_SCANOUT in drv.h
 constexpr uint64_t kBoUseTexture = 1ull << 5;   // BO_USE_TEXTURE in drv.h
 constexpr uint32_t kCrosGrallocMagic = 0xABCDDCBA; // cros_gralloc_handle::magic
+
+// QTI gralloc private_handle_t constants (from gr_priv_handle.h).
+// Duplicated to avoid a build dependency on the QTI gralloc HAL.
+constexpr int kQtiGrallocMagic = 'gmsm';
+constexpr int kQtiNumFds = 2;  // fd + fd_metadata
 
 namespace android {
 
@@ -173,8 +187,7 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
         }
 
         if (imported) {
-            // Queue the previous buffer for release after the next composite cycle.
-            // Per Wayland protocol, release must wait until the compositor is done reading.
+            // Queue the previous buffer for release after the next composite.
             if (surface->currentBuffer && surface->currentBuffer != surface->pendingBuffer) {
                 surface->compositor->queueBufferRelease(surface->currentBuffer);
             }
@@ -201,128 +214,117 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
 
 void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf) {
     const uint32_t numPlanes = static_cast<uint32_t>(dmabuf->planes.size());
-    if (numPlanes == 0 || numPlanes > DRV_MAX_PLANES) {
+    if (numPlanes == 0) {
         ALOGE("Invalid plane count %u", numPlanes);
         return;
     }
 
     PixelFormat pixFmt = drmToPixelFormat(dmabuf->format);
-    uint32_t bpp = bytesPerPixel(pixFmt);
     uint32_t w = static_cast<uint32_t>(dmabuf->width);
     uint32_t h = static_cast<uint32_t>(dmabuf->height);
     uint32_t stride = dmabuf->planes[0].stride;
-    uint32_t pixelStride = (bpp > 0) ? stride / bpp : stride;
+
     uint64_t usage = GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_HW_COMPOSER;
+    uint32_t bpp = bytesPerPixel(pixFmt);
+    uint32_t pixelStride = (bpp > 0) ? stride / bpp : stride;
+
+    // Look up the dmabuf by its inode to reuse cached GraphicBuffer imports.
+    // Vulkan swapchains cycle through a fixed set of dmabuf fds.
+    struct stat st;
+    uint64_t inodeKey = 0;
+    if (fstat(dmabuf->planes[0].fd, &st) == 0) {
+        inodeKey = st.st_ino;
+    }
 
     sp<GraphicBuffer> gb;
-
-    // --- Strategy 1: cros_gralloc (minigbm) direct import via DRM PRIME ---
-    // Works on Cuttlefish and ChromeOS-derived gralloc implementations.
-    {
-        const int numFds = static_cast<int>(numPlanes);
-        const int numInts = static_cast<int>(
-                (sizeof(struct cros_gralloc_handle) - sizeof(native_handle_t)) / sizeof(int)) -
-                numFds;
-
-        auto* hnd = reinterpret_cast<struct cros_gralloc_handle*>(
-                native_handle_create(numFds, numInts));
-        if (hnd) {
-            memset(&hnd->fds, 0, sizeof(struct cros_gralloc_handle) - sizeof(native_handle_t));
-            for (size_t i = 0; i < DRV_MAX_FDS; i++)
-                hnd->fds[i] = -1;
-
-            for (uint32_t i = 0; i < numPlanes; i++) {
-                hnd->fds[i] = dmabuf->planes[i].fd;
-                hnd->strides[i] = dmabuf->planes[i].stride;
-                hnd->offsets[i] = dmabuf->planes[i].offset;
-                hnd->sizes[i] = dmabuf->planes[i].stride * h;
-            }
-
-            static std::atomic<uint32_t> nextBufferId{1};
-            hnd->id = nextBufferId++;
-            hnd->width = w;
-            hnd->height = h;
-            hnd->format = dmabuf->format;
-            hnd->tiling = 0;
-            hnd->format_modifier = dmabuf->planes[0].modifier;
-            hnd->use_flags = kBoUseTexture | kBoUseScanout;
-            hnd->magic = kCrosGrallocMagic;
-            hnd->pixel_stride = pixelStride;
-            hnd->droid_format = pixFmt;
-            hnd->usage = static_cast<int64_t>(usage);
-            hnd->num_planes = numPlanes;
-            hnd->reserved_region_size = 0;
-            hnd->total_size = 0;
-            for (uint32_t i = 0; i < numPlanes; i++)
-                hnd->total_size += hnd->sizes[i];
-
-            sp<GraphicBuffer> candidate = sp<GraphicBuffer>::make(
-                    reinterpret_cast<const native_handle_t*>(hnd), GraphicBuffer::CLONE_HANDLE,
-                    w, h, pixFmt, 1u, usage, pixelStride);
-
-            for (uint32_t i = 0; i < numPlanes; i++)
-                hnd->fds[i] = -1;
-            native_handle_close(reinterpret_cast<native_handle_t*>(hnd));
-            native_handle_delete(reinterpret_cast<native_handle_t*>(hnd));
-
-            if (candidate->initCheck() == NO_ERROR) {
-                gb = std::move(candidate);
-                ALOGD("dmabuf import: cros_gralloc path succeeded for %ux%u", w, h);
-            }
+    if (inodeKey != 0) {
+        auto it = importedBuffers.find(inodeKey);
+        if (it != importedBuffers.end()) {
+            gb = it->second;
         }
     }
 
-    // --- Strategy 2: mmap + copy fallback for non-minigbm gralloc (e.g. QTI) ---
-    // Allocate a new GraphicBuffer and copy the client's dmabuf content into it.
-    // This is a CPU copy but works with any gralloc and any standard Wayland client.
     if (!gb) {
-        int fd = dmabuf->planes[0].fd;
-        uint32_t offset = dmabuf->planes[0].offset;
-        size_t mapSize = static_cast<size_t>(stride) * h + offset;
+        // --- QTI gralloc zero-copy import via private_handle_t ---
+        int metaFd = static_cast<int>(
+                syscall(__NR_memfd_create, "wayland_dmabuf_meta", MFD_CLOEXEC));
+        if (metaFd >= 0) {
+            const size_t metaSize = 65536;
+            ftruncate(metaFd, metaSize);
+            void* metaMap = mmap(nullptr, metaSize, PROT_READ | PROT_WRITE,
+                                MAP_SHARED, metaFd, 0);
+            if (metaMap != MAP_FAILED) {
+                memset(metaMap, 0, metaSize);
+                munmap(metaMap, metaSize);
+            }
 
-        void* src = mmap(nullptr, mapSize, PROT_READ, MAP_SHARED, fd, 0);
-        if (src == MAP_FAILED) {
-            ALOGE("dmabuf import: mmap failed for fd %d: %s", fd, strerror(errno));
-            return;
+            constexpr int kQtiNumInts = 23;
+            auto* hnd = reinterpret_cast<native_handle_t*>(
+                    native_handle_create(kQtiNumFds, kQtiNumInts));
+            if (hnd) {
+                int* data = &hnd->data[0];
+                memset(data, 0, (kQtiNumFds + kQtiNumInts) * sizeof(int));
+
+                int dupFd = dup(dmabuf->planes[0].fd);
+                int dupMetaFd = dup(metaFd);
+
+                data[0] = dupFd;
+                data[1] = dupMetaFd;
+                int idx = 2;
+                data[idx++] = kQtiGrallocMagic;
+                data[idx++] = 0x00100000 | 0x00080000;
+                data[idx++] = static_cast<int>(pixelStride);
+                data[idx++] = static_cast<int>(h);
+                data[idx++] = static_cast<int>(w);
+                data[idx++] = static_cast<int>(h);
+                data[idx++] = pixFmt;
+                data[idx++] = 0;
+                *reinterpret_cast<unsigned int*>(&data[idx++]) = 1;
+                static std::atomic<uint64_t> nextQtiId{1};
+                uint64_t bufId = nextQtiId++;
+                memcpy(&data[idx], &bufId, sizeof(uint64_t));
+                idx += 2;
+                memcpy(&data[idx], &usage, sizeof(uint64_t));
+                idx += 2;
+                *reinterpret_cast<unsigned int*>(&data[idx++]) = stride * h;
+
+                buffer_handle_t importedHandle = nullptr;
+                status_t importErr = GraphicBufferMapper::get().importBufferNoValidate(
+                        hnd, &importedHandle);
+
+                data[0] = -1;
+                data[1] = -1;
+                close(dupFd);
+                close(dupMetaFd);
+                native_handle_delete(hnd);
+
+                if (importErr == NO_ERROR && importedHandle) {
+                    sp<GraphicBuffer> candidate = sp<GraphicBuffer>::make(
+                            importedHandle, GraphicBuffer::WRAP_HANDLE,
+                            w, h, pixFmt, 1u, usage, pixelStride);
+                    if (candidate->initCheck() == NO_ERROR) {
+                        gb = std::move(candidate);
+                        if (inodeKey != 0) {
+                            importedBuffers[inodeKey] = gb;
+                        }
+                        ALOGD("dmabuf import: QTI gralloc imported %ux%u (inode %" PRIu64 ")",
+                              w, h, inodeKey);
+                    } else {
+                        GraphicBufferMapper::get().freeBuffer(importedHandle);
+                    }
+                }
+            }
+            close(metaFd);
         }
+    }
 
-        gb = sp<GraphicBuffer>::make(w, h, pixFmt, 1u,
-                static_cast<uint64_t>(GRALLOC_USAGE_SW_WRITE_OFTEN |
-                                      GRALLOC_USAGE_HW_TEXTURE |
-                                      GRALLOC_USAGE_HW_COMPOSER),
-                "WaylandDmabuf");
-
-        if (gb->initCheck() != NO_ERROR) {
-            ALOGE("dmabuf import: GraphicBuffer alloc failed");
-            munmap(src, mapSize);
-            return;
-        }
-
-        void* dst = nullptr;
-        status_t lockErr = gb->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, &dst);
-        if (lockErr != NO_ERROR || !dst) {
-            ALOGE("dmabuf import: GraphicBuffer lock failed: %d", lockErr);
-            munmap(src, mapSize);
-            return;
-        }
-
-        const uint8_t* srcBytes = static_cast<const uint8_t*>(src) + offset;
-        uint8_t* dstBytes = static_cast<uint8_t*>(dst);
-        uint32_t dstStride = gb->getStride() * bpp;
-        uint32_t copyWidth = w * bpp;
-        for (uint32_t y = 0; y < h; y++) {
-            memcpy(dstBytes + y * dstStride, srcBytes + y * stride, copyWidth);
-        }
-
-        gb->unlock();
-        munmap(src, mapSize);
-        ALOGD("dmabuf import: mmap+copy fallback for %ux%u (stride %u→%u)", w, h, stride, dstStride);
+    if (!gb) {
+        ALOGE("dmabuf import: all strategies failed for %ux%u", w, h);
+        return;
     }
 
     ++frameNumber;
 
-    // Post the SF transaction to a dedicated buffer thread to avoid blocking
-    // the Wayland dispatch thread.
     WaylandCompositor::BufferWork bw;
     bw.handle = handle;
     bw.gb = gb;
@@ -331,6 +333,7 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf) {
     bw.layerId = layerId;
     bw.width = dmabuf->width;
     bw.height = dmabuf->height;
+    bw.dmabufFd = dup(dmabuf->planes[0].fd);
     compositor->postBufferWork(std::move(bw));
 
     ALOGD("wl_surface.commit: imported %dx%d buffer (fmt=0x%08x) to layer %u, frame %" PRIu64,

@@ -137,8 +137,12 @@ private:
     std::mutex mCallbacksMutex;
     std::vector<struct wl_resource*> mPendingFrameCallbacks GUARDED_BY(mCallbacksMutex);
 
-    // Buffers queued for release after composite (previous buffers replaced during commit).
+    // Two-stage buffer release: buffers are first added to mPendingBufferReleases,
+    // then on the next composite cycle moved to mReadyBufferReleases, then on the
+    // NEXT composite cycle actually released. This 2-frame delay ensures HWC has
+    // fully finished scanning out the buffer before the client reuses it.
     std::vector<struct wl_resource*> mPendingBufferReleases GUARDED_BY(mCallbacksMutex);
+    std::vector<struct wl_resource*> mReadyBufferReleases GUARDED_BY(mCallbacksMutex);
     uint32_t mPendingVsyncTimeMs GUARDED_BY(mCallbacksMutex) = 0;
 
     // Pending configure events (queued from binder thread, dispatched on Wayland thread).
@@ -177,8 +181,10 @@ public:
         uint32_t layerId;
         int32_t width;
         int32_t height;
+        int dmabufFd = -1; // dup'd dmabuf fd for sync (buffer thread will close)
     };
     void postBufferWork(BufferWork&& work);
+
 private:
     std::thread mBufferThread;
     std::mutex mBufferMutex;

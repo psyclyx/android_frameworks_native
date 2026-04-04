@@ -45,15 +45,13 @@ struct FormatModifier {
     uint64_t modifier;
 };
 
+// Only advertise LINEAR — DRM_FORMAT_MOD_INVALID causes Turnip to use UBWC
+// tiling internally, which produces stride mismatches with our linear gralloc import.
 const FormatModifier kSupportedFormats[] = {
         {DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_LINEAR},
         {DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_LINEAR},
         {DRM_FORMAT_ABGR8888, DRM_FORMAT_MOD_LINEAR},
         {DRM_FORMAT_XBGR8888, DRM_FORMAT_MOD_LINEAR},
-        {DRM_FORMAT_ARGB8888, DRM_FORMAT_MOD_INVALID},
-        {DRM_FORMAT_XRGB8888, DRM_FORMAT_MOD_INVALID},
-        {DRM_FORMAT_ABGR8888, DRM_FORMAT_MOD_INVALID},
-        {DRM_FORMAT_XBGR8888, DRM_FORMAT_MOD_INVALID},
 };
 } // anonymous namespace
 
