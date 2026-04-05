@@ -428,19 +428,11 @@ public class WaylandAppLauncherActivity extends Activity {
         final String cmd = exec;
         new Thread(() -> {
             try {
+                // Minimal env — Wayland vars come from /etc/profile.d/wayland.sh
                 String fullCmd = "chroot " + chrootPath + " /usr/bin/env"
-                    + " PATH=/usr/bin:/bin:/usr/sbin:/sbin"
                     + " HOME=/root"
-                    + " SHELL=/usr/bin/bash"
-                    + " XDG_RUNTIME_DIR=/run/wayland"
-                    + " WAYLAND_DISPLAY=wayland-0"
-                    + " LANG=C.UTF-8"
-                    + " TERM=xterm-256color"
-                    + " TMPDIR=/tmp"
-                    + " GDK_BACKEND=wayland"
-                    + " GSK_RENDERER=cairo"
-                    + " GDK_GL=disabled"
-                    + " dbus-run-session " + cmd;
+                    + " PATH=/usr/bin:/bin:/usr/sbin:/sbin"
+                    + " /bin/bash -lc 'dbus-run-session " + cmd.replace("'", "'\\''") + "'";
                 Log.i(TAG, "Full command: su 0 sh -c '" + fullCmd + "'");
                 Process p = Runtime.getRuntime().exec(new String[]{
                     "su", "0", "sh", "-c", fullCmd
