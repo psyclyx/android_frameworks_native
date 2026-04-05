@@ -282,6 +282,7 @@ filegroup {
         "Wayland/WaylandCompositor.cpp",
         "Wayland/WaylandDataDevice.cpp",
         "Wayland/WaylandDecoration.cpp",
+        "Wayland/server-decoration-protocol.c",
         "Wayland/WaylandDmabuf.cpp",
         "Wayland/WaylandDrm.cpp",
         "Wayland/WaylandLayerShell.cpp",
