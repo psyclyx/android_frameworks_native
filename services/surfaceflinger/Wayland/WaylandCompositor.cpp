@@ -620,6 +620,18 @@ void WaylandCompositor::requestDestroyWindow(int layerId) {
     service->transact(TRANSACTION_destroyWindow, data, &reply);
 }
 
+void WaylandCompositor::requestSetTitle(int layerId, const char* title) {
+    sp<IBinder> service = defaultServiceManager()->checkService(
+            String16("wayland_window_manager"));
+    if (!service) return;
+
+    Parcel data, reply;
+    data.writeInterfaceToken(String16("org.lineageos.wayland.IWaylandWindowManager"));
+    data.writeInt32(layerId);
+    data.writeString16(title ? String16(title) : String16());
+    service->transact(TRANSACTION_setTitle, data, &reply);
+}
+
 void WaylandCompositor::reparentLayerUnderWindow(int layerId, const sp<IBinder>& windowHandle) {
     // Find the Wayland surface with this layerId
     sp<IBinder> waylandHandle;

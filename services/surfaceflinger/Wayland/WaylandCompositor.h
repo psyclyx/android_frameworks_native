@@ -76,6 +76,7 @@ public:
                              const char* title, const char* appId,
                              int width, int height);
     void requestDestroyWindow(int layerId);
+    void requestSetTitle(int layerId, const char* title);
     void requestSetExclusiveZones(int top, int right, int bottom, int left);
     void reparentLayerUnderWindow(int layerId, const sp<IBinder>& windowHandle);
 

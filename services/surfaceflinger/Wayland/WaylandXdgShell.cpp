@@ -262,6 +262,10 @@ void WaylandXdgShell::toplevelSetTitle(struct wl_client* /*client*/,
     auto* xdgSurface = static_cast<WaylandXdgSurface*>(wl_resource_get_user_data(resource));
     if (xdgSurface && title) {
         xdgSurface->title = title;
+        WaylandSurface* ws = xdgSurface->compositor->findSurface(xdgSurface->wlSurface);
+        if (ws) {
+            xdgSurface->compositor->requestSetTitle(static_cast<int>(ws->layerId), title);
+        }
     }
     ALOGD("xdg_toplevel.set_title: %s", title ? title : "(null)");
 }
