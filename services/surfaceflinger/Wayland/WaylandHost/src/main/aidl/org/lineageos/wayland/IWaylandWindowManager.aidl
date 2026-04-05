@@ -7,7 +7,8 @@ interface IWaylandWindowManager {
     // The callback will be invoked when the Activity's window is ready,
     // providing the window's SurfaceControl handle for reparenting.
     void createWindow(int layerId, String title, String appId,
-                      int width, int height, IWaylandWindowCallback callback);
+                      int width, int height, int parentLayerId,
+                      IWaylandWindowCallback callback);
 
     // Called when the xdg_toplevel is destroyed.
     void destroyWindow(int layerId);

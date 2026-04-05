@@ -27,6 +27,7 @@
 #include "WaylandDmabuf.h"
 #include "WaylandLayerShell.h"
 #include "WaylandShm.h"
+#include "WaylandXdgShell.h"
 
 #include "Layer.h"
 #include "SurfaceFlinger.h"
@@ -211,6 +212,37 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
         }
         surface->bufferAttached = false;
         surface->pendingBuffer = nullptr;
+    }
+
+    // Deferred window creation: on first commit with a buffer, if this surface
+    // has an xdg_toplevel role, create the Android window now. By this point we
+    // know title, app_id, parent, and buffer dimensions.
+    if (surface->xdgSurface && surface->xdgToplevel && surface->currentBuffer) {
+        auto* xdgSurf = static_cast<WaylandXdgSurface*>(
+                wl_resource_get_user_data(surface->xdgSurface));
+        if (xdgSurf && !xdgSurf->mapped) {
+            xdgSurf->mapped = true;
+
+            // Resolve parent layerId (-1 = no parent = top-level Activity)
+            int parentLayerId = -1;
+            if (xdgSurf->parentToplevel) {
+                auto* parentXdg = static_cast<WaylandXdgSurface*>(
+                        wl_resource_get_user_data(xdgSurf->parentToplevel));
+                if (parentXdg) {
+                    WaylandSurface* parentWs =
+                            surface->compositor->findSurface(parentXdg->wlSurface);
+                    if (parentWs) {
+                        parentLayerId = static_cast<int>(parentWs->layerId);
+                    }
+                }
+            }
+
+            surface->compositor->requestCreateWindow(
+                    static_cast<int>(surface->layerId), surface->handle,
+                    xdgSurf->title.empty() ? nullptr : xdgSurf->title.c_str(),
+                    xdgSurf->appId.empty() ? nullptr : xdgSurf->appId.c_str(),
+                    parentLayerId, 0, 0);
+        }
     }
 
     // Layer-shell: send initial configure on first commit (no buffer),

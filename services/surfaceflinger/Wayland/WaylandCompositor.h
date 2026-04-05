@@ -75,7 +75,7 @@ public:
     // Request the Android WaylandWindowService to create/destroy a window.
     void requestCreateWindow(int layerId, const sp<IBinder>& layerHandle,
                              const char* title, const char* appId,
-                             int width, int height);
+                             int parentLayerId, int width, int height);
     void requestDestroyWindow(int layerId);
     void requestSetTitle(int layerId, const char* title);
     void requestSetExclusiveZones(int top, int right, int bottom, int left);

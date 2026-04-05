@@ -25,6 +25,8 @@ public class WaylandWindowService extends Service {
 
     private final SparseArray<WaylandWindowActivity> mWindows = new SparseArray<>();
     private final SparseArray<IWaylandWindowCallback> mCallbacks = new SparseArray<>();
+    // Maps dialog layerId -> host Activity (the parent that owns the panel)
+    private final SparseArray<WaylandWindowActivity> mDialogHosts = new SparseArray<>();
 
     static WaylandWindowService getInstance() {
         return sInstance;
@@ -39,15 +41,34 @@ public class WaylandWindowService extends Service {
     private final IWaylandWindowManager.Stub mBinder = new IWaylandWindowManager.Stub() {
         @Override
         public void createWindow(int layerId, String title, String appId,
-                                 int width, int height,
+                                 int width, int height, int parentLayerId,
                                  IWaylandWindowCallback callback) {
             Log.i(TAG, "createWindow: layerId=" + layerId + " title=" + title
-                    + " appId=" + appId + " size=" + width + "x" + height);
+                    + " appId=" + appId + " size=" + width + "x" + height
+                    + " parent=" + parentLayerId);
 
             synchronized (mCallbacks) {
                 mCallbacks.put(layerId, callback);
             }
 
+            String displayTitle = title != null ? title : (appId != null ? appId : "Wayland");
+
+            if (parentLayerId >= 0) {
+                // Dialog: create as sub-window on parent Activity
+                WaylandWindowActivity parentActivity;
+                synchronized (mWindows) {
+                    parentActivity = mWindows.get(parentLayerId);
+                }
+                if (parentActivity != null) {
+                    parentActivity.runOnUiThread(() ->
+                            parentActivity.addDialogWindow(layerId, displayTitle, width, height));
+                    return;
+                }
+                Log.w(TAG, "Parent activity not found for layerId=" + parentLayerId
+                        + ", falling back to top-level Activity");
+            }
+
+            // Top-level: create new Activity
             Intent intent = new Intent(WaylandWindowService.this,
                     WaylandWindowActivity.class);
             intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
@@ -55,8 +76,7 @@ public class WaylandWindowService extends Service {
 
             Bundle extras = new Bundle();
             extras.putInt(WaylandWindowActivity.EXTRA_LAYER_ID, layerId);
-            extras.putString(WaylandWindowActivity.EXTRA_TITLE,
-                    title != null ? title : (appId != null ? appId : "Wayland"));
+            extras.putString(WaylandWindowActivity.EXTRA_TITLE, displayTitle);
             extras.putInt(WaylandWindowActivity.EXTRA_WIDTH, width);
             extras.putInt(WaylandWindowActivity.EXTRA_HEIGHT, height);
             intent.putExtras(extras);
@@ -70,6 +90,8 @@ public class WaylandWindowService extends Service {
             synchronized (mCallbacks) {
                 mCallbacks.remove(layerId);
             }
+
+            // Check if this is a top-level Activity
             WaylandWindowActivity activity;
             synchronized (mWindows) {
                 activity = mWindows.get(layerId);
@@ -77,6 +99,13 @@ public class WaylandWindowService extends Service {
             }
             if (activity != null) {
                 activity.runOnUiThread(activity::finish);
+                return;
+            }
+
+            // Check if this is a dialog sub-window on any Activity
+            WaylandWindowActivity host = findDialogHost(layerId);
+            if (host != null) {
+                host.runOnUiThread(() -> host.removeDialogWindow(layerId));
             }
         }
 
@@ -208,6 +237,24 @@ public class WaylandWindowService extends Service {
             } catch (RemoteException e) {
                 Log.e(TAG, "Failed to notify compositor of window ready", e);
             }
+        }
+    }
+
+    void registerDialogHost(int dialogLayerId, WaylandWindowActivity host) {
+        synchronized (mDialogHosts) {
+            mDialogHosts.put(dialogLayerId, host);
+        }
+    }
+
+    void unregisterDialogHost(int dialogLayerId) {
+        synchronized (mDialogHosts) {
+            mDialogHosts.remove(dialogLayerId);
+        }
+    }
+
+    WaylandWindowActivity findDialogHost(int dialogLayerId) {
+        synchronized (mDialogHosts) {
+            return mDialogHosts.get(dialogLayerId);
         }
     }
 

@@ -32,9 +32,12 @@ struct WaylandXdgSurface {
     struct wl_resource* resource = nullptr;     // xdg_surface resource
     struct wl_resource* wlSurface = nullptr;    // underlying wl_surface
     struct wl_resource* toplevel = nullptr;      // xdg_toplevel (if role assigned)
+    struct wl_resource* popup = nullptr;         // xdg_popup (if role assigned)
+    struct wl_resource* parentToplevel = nullptr; // set_parent target (for dialogs)
     uint32_t pendingConfigureSerial = 0;
     std::string title;
     std::string appId;
+    bool mapped = false; // true after first commit triggers window creation
 };
 
 // Manages xdg_wm_base global, xdg_surface, and xdg_toplevel.

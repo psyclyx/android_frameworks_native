@@ -162,26 +162,17 @@ void WaylandXdgShell::xdgSurfaceGetToplevel(struct wl_client* client,
     wl_resource_set_implementation(toplevel, &kToplevelImpl, xdgSurface, onToplevelDestroy);
 
     // Store toplevel reference on the WaylandSurface.
-    WaylandSurface* ws2 = xdgSurface->compositor->findSurface(xdgSurface->wlSurface);
-    if (ws2) {
-        ws2->xdgToplevel = toplevel;
-    }
-
-    // Send initial configure sequence: toplevel.configure → xdg_surface.configure
-    sendToplevelConfigure(toplevel, resource);
-
-    // Request Android to create a window (Activity) for this toplevel.
-    // The window will reparent the Wayland layer under itself once ready.
     WaylandSurface* ws = xdgSurface->compositor->findSurface(xdgSurface->wlSurface);
     if (ws) {
-        xdgSurface->compositor->requestCreateWindow(
-                static_cast<int>(ws->layerId), ws->handle,
-                xdgSurface->title.empty() ? nullptr : xdgSurface->title.c_str(),
-                xdgSurface->appId.empty() ? nullptr : xdgSurface->appId.c_str(),
-                0, 0); // width/height 0 = client chooses
+        ws->xdgToplevel = toplevel;
     }
 
-    ALOGI("xdg_toplevel created for xdg_surface %p", resource);
+    // Send initial configure sequence: toplevel.configure → xdg_surface.configure.
+    // Window creation is deferred to first wl_surface.commit so we have
+    // title, app_id, parent, and buffer dimensions.
+    sendToplevelConfigure(toplevel, resource);
+
+    ALOGI("xdg_toplevel created for xdg_surface %p (window creation deferred to commit)", resource);
 }
 
 void WaylandXdgShell::xdgSurfaceGetPopup(struct wl_client* /*client*/,
@@ -254,8 +245,14 @@ void WaylandXdgShell::onToplevelDestroy(struct wl_resource* resource) {
 }
 
 void WaylandXdgShell::toplevelSetParent(struct wl_client* /*client*/,
-                                         struct wl_resource* /*resource*/,
-                                         struct wl_resource* /*parent*/) {}
+                                         struct wl_resource* resource,
+                                         struct wl_resource* parent) {
+    auto* xdgSurface = static_cast<WaylandXdgSurface*>(wl_resource_get_user_data(resource));
+    if (xdgSurface) {
+        xdgSurface->parentToplevel = parent;
+        ALOGD("xdg_toplevel.set_parent: %p -> parent %p", resource, parent);
+    }
+}
 
 void WaylandXdgShell::toplevelSetTitle(struct wl_client* /*client*/,
                                         struct wl_resource* resource, const char* title) {

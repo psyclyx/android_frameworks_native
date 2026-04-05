@@ -567,7 +567,7 @@ private:
 
 void WaylandCompositor::requestCreateWindow(int layerId, const sp<IBinder>& /*layerHandle*/,
                                              const char* title, const char* appId,
-                                             int width, int height) {
+                                             int parentLayerId, int width, int height) {
     sp<IServiceManager> sm = defaultServiceManager();
     if (!sm) {
         ALOGE("requestCreateWindow: no service manager");
@@ -578,7 +578,8 @@ void WaylandCompositor::requestCreateWindow(int layerId, const sp<IBinder>& /*la
         ALOGW("wayland_window_manager service not found, window will not be managed");
         return;
     }
-    ALOGI("requestCreateWindow: found service, calling createWindow for layer %d", layerId);
+    ALOGI("requestCreateWindow: layer %d parent %d title=%s appId=%s",
+          layerId, parentLayerId, title ? title : "(null)", appId ? appId : "(null)");
 
     Parcel data, reply;
     data.writeInterfaceToken(String16("org.lineageos.wayland.IWaylandWindowManager"));
@@ -587,6 +588,7 @@ void WaylandCompositor::requestCreateWindow(int layerId, const sp<IBinder>& /*la
     data.writeString16(appId ? String16(appId) : String16());
     data.writeInt32(width);
     data.writeInt32(height);
+    data.writeInt32(parentLayerId);
     sp<WaylandWindowCallback> callback = sp<WaylandWindowCallback>::make(this);
     data.writeStrongBinder(callback);
 
