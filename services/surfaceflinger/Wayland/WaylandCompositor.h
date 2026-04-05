@@ -76,6 +76,7 @@ public:
                              const char* title, const char* appId,
                              int width, int height);
     void requestDestroyWindow(int layerId);
+    void requestSetExclusiveZones(int top, int right, int bottom, int left);
     void reparentLayerUnderWindow(int layerId, const sp<IBinder>& windowHandle);
 
     // Queue frame callbacks to be fired after the next composite cycle.

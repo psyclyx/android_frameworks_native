@@ -123,6 +123,19 @@ public class WaylandWindowService extends Service {
         }
 
         @Override
+        public void setExclusiveZones(int top, int right, int bottom, int left) {
+            Log.i(TAG, "setExclusiveZones: top=" + top + " right=" + right
+                    + " bottom=" + bottom + " left=" + left);
+            try {
+                Runtime.getRuntime().exec(new String[]{
+                    "wm", "overscan", top + "," + left + "," + bottom + "," + right
+                }).waitFor();
+            } catch (Exception e) {
+                Log.e(TAG, "Failed to set overscan", e);
+            }
+        }
+
+        @Override
         public void sendKey(int layerId, long timeMs, int evdevKey, boolean pressed) {
             IWaylandWindowCallback callback;
             synchronized (mCallbacks) {

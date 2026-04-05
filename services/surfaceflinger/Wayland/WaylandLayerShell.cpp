@@ -232,6 +232,10 @@ void WaylandLayerShell::onLayerSurfaceDestroy(struct wl_resource* resource) {
         if (ws) {
             ws->layerSurface = nullptr;
         }
+        // Reset overscan if this surface had an exclusive zone.
+        if (ls->exclusiveZone > 0) {
+            ls->compositor->requestSetExclusiveZones(0, 0, 0, 0);
+        }
     }
     delete ls;
 }
@@ -333,6 +337,27 @@ void WaylandLayerShell::applyLayout(WaylandLayerSurface* ls) {
 
     ALOGD("layer_surface layout: pos=(%d,%d) z=%d layer=%u anchor=0x%x",
           x, y, z, ls->layer, ls->anchor);
+
+    // Apply exclusive zone to Android display overscan.
+    if (ls->exclusiveZone > 0) {
+        int32_t ezTop = 0, ezRight = 0, ezBottom = 0, ezLeft = 0;
+        // Determine which edge the exclusive zone applies to.
+        bool anchorT = ls->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP;
+        bool anchorB = ls->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_BOTTOM;
+        bool anchorL = ls->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT;
+        bool anchorR = ls->anchor & ZWLR_LAYER_SURFACE_V1_ANCHOR_RIGHT;
+
+        if (anchorT && !anchorB) ezTop = ls->exclusiveZone;
+        else if (anchorB && !anchorT) ezBottom = ls->exclusiveZone;
+        else if (anchorL && !anchorR) ezLeft = ls->exclusiveZone;
+        else if (anchorR && !anchorL) ezRight = ls->exclusiveZone;
+        // If anchored to both edges of an axis (e.g. top+bottom), exclusive zone
+        // is meaningless per the protocol spec.
+
+        if (ezTop || ezRight || ezBottom || ezLeft) {
+            ls->compositor->requestSetExclusiveZones(ezTop, ezRight, ezBottom, ezLeft);
+        }
+    }
 }
 
 } // namespace android

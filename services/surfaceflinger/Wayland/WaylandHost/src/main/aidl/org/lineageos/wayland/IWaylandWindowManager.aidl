@@ -19,4 +19,7 @@ interface IWaylandWindowManager {
     void sendPointerMotion(int layerId, long timeMs, float x, float y);
     void sendPointerButton(int layerId, long timeMs, int button, boolean pressed);
     void sendKey(int layerId, long timeMs, int evdevKey, boolean pressed);
+
+    // Set display overscan to account for layer-shell exclusive zones.
+    void setExclusiveZones(int top, int right, int bottom, int left);
 }

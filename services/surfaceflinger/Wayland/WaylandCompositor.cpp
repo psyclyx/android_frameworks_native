@@ -443,6 +443,10 @@ enum {
     TRANSACTION_createWindow = ::android::IBinder::FIRST_CALL_TRANSACTION + 0,
     TRANSACTION_destroyWindow = ::android::IBinder::FIRST_CALL_TRANSACTION + 1,
     TRANSACTION_setTitle = ::android::IBinder::FIRST_CALL_TRANSACTION + 2,
+    TRANSACTION_sendPointerMotion = ::android::IBinder::FIRST_CALL_TRANSACTION + 3,
+    TRANSACTION_sendPointerButton = ::android::IBinder::FIRST_CALL_TRANSACTION + 4,
+    TRANSACTION_sendKey = ::android::IBinder::FIRST_CALL_TRANSACTION + 5,
+    TRANSACTION_setExclusiveZones = ::android::IBinder::FIRST_CALL_TRANSACTION + 6,
 };
 
 enum {
@@ -588,6 +592,21 @@ void WaylandCompositor::requestCreateWindow(int layerId, const sp<IBinder>& /*la
             ALOGE("createWindow threw exception: %d", exceptionCode);
         }
     }
+}
+
+void WaylandCompositor::requestSetExclusiveZones(int top, int right, int bottom, int left) {
+    sp<IBinder> service = defaultServiceManager()->checkService(
+            String16("wayland_window_manager"));
+    if (!service) return;
+
+    Parcel data, reply;
+    data.writeInterfaceToken(String16("org.lineageos.wayland.IWaylandWindowManager"));
+    data.writeInt32(top);
+    data.writeInt32(right);
+    data.writeInt32(bottom);
+    data.writeInt32(left);
+    service->transact(TRANSACTION_setExclusiveZones, data, &reply);
+    ALOGI("requestSetExclusiveZones: top=%d right=%d bottom=%d left=%d", top, right, bottom, left);
 }
 
 void WaylandCompositor::requestDestroyWindow(int layerId) {
