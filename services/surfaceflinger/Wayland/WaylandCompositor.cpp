@@ -1142,14 +1142,7 @@ void WaylandCompositor::bufferThreadLoop() {
                 cs.state.bufferData->releaseBufferEndpoint =
                         IInterface::asBinder(mReleaseListener);
             }
-            // Use window geometry as crop if set (clips CSD shadows).
-            if (item.cropW > 0 && item.cropH > 0) {
-                cs.state.crop = FloatRect(item.cropX, item.cropY,
-                                          item.cropX + item.cropW,
-                                          item.cropY + item.cropH);
-            } else {
-                cs.state.crop = FloatRect(0, 0, item.width, item.height);
-            }
+            cs.state.crop = FloatRect(0, 0, item.width, item.height);
 
             // Register a per-layer callback so SF invokes onReleaseBuffer with
             // HWC's release fence when the buffer is replaced.

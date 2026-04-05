@@ -226,8 +226,6 @@ public:
         int dmabufFd = -1; // dup'd dmabuf fd for sync (buffer thread will close)
         sp<Fence> acquireFence; // GPU fence extracted at commit time
         struct wl_resource* wlBuffer = nullptr; // for fence-based release tracking
-        // Crop rect (buffer pixels) from set_window_geometry — clips CSD shadows.
-        int32_t cropX = 0, cropY = 0, cropW = 0, cropH = 0;
     };
     void postBufferWork(BufferWork&& work);
 

@@ -69,10 +69,6 @@ struct WaylandSurface {
     // XDG popup role resource (set when get_popup is called)
     struct wl_resource* xdgPopup = nullptr;
 
-    // Window geometry (buffer pixel coords) — crop rect for clipping CSD shadows.
-    // Updated from xdg_surface.set_window_geometry on each commit.
-    int32_t cropX = 0, cropY = 0, cropW = 0, cropH = 0;
-
     // Layer shell role resource (set when get_layer_surface is called)
     struct wl_resource* layerSurface = nullptr;
 
