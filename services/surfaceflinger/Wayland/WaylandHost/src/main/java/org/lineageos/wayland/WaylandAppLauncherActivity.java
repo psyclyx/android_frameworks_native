@@ -1,9 +1,7 @@
 package org.lineageos.wayland;
 
-import android.app.ActionBar;
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.app.FragmentTransaction;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Bundle;
@@ -44,12 +42,61 @@ public class WaylandAppLauncherActivity extends Activity {
 
     private int mCurrentTab = 0; // 0=Apps, 1=Processes
 
+    private TextView mAppsTab;
+    private TextView mProcsTab;
+
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        setTitle("Linux Apps");
 
-        // --- Apps tab ---
+        if (getActionBar() != null) getActionBar().hide();
+
+        android.widget.LinearLayout root = new android.widget.LinearLayout(this);
+        root.setOrientation(android.widget.LinearLayout.VERTICAL);
+        root.setFitsSystemWindows(true);
+
+        // --- Title ---
+        TextView title = new TextView(this);
+        title.setText("Linux Apps");
+        title.setTextSize(22);
+        title.setTextColor(0xFFFFFFFF);
+        title.setPadding(48, 32, 48, 16);
+        root.addView(title);
+
+        // --- Tab bar ---
+        android.widget.LinearLayout tabBar = new android.widget.LinearLayout(this);
+        tabBar.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        android.widget.LinearLayout.LayoutParams tabWeight =
+                new android.widget.LinearLayout.LayoutParams(0,
+                        android.widget.LinearLayout.LayoutParams.WRAP_CONTENT, 1f);
+
+        mAppsTab = new TextView(this);
+        mAppsTab.setText("Apps");
+        mAppsTab.setTextSize(16);
+        mAppsTab.setTextColor(0xFFFFFFFF);
+        mAppsTab.setGravity(android.view.Gravity.CENTER);
+        mAppsTab.setPadding(0, 36, 0, 36);
+        mAppsTab.setOnClickListener(v -> showTab(0));
+        tabBar.addView(mAppsTab, tabWeight);
+
+        mProcsTab = new TextView(this);
+        mProcsTab.setText("Processes");
+        mProcsTab.setTextSize(16);
+        mProcsTab.setTextColor(0xFFFFFFFF);
+        mProcsTab.setGravity(android.view.Gravity.CENTER);
+        mProcsTab.setPadding(0, 36, 0, 36);
+        mProcsTab.setOnClickListener(v -> showTab(1));
+        tabBar.addView(mProcsTab, tabWeight);
+
+        root.addView(tabBar);
+
+        // --- Content area ---
+        android.widget.FrameLayout content = new android.widget.FrameLayout(this);
+        android.widget.LinearLayout.LayoutParams contentLp =
+                new android.widget.LinearLayout.LayoutParams(
+                        android.widget.LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f);
+
+        // Apps
         mAppsListView = new ListView(this);
         mAppsRefresh = new SwipeRefreshLayout(this);
         mAppsRefresh.addView(mAppsListView);
@@ -57,8 +104,9 @@ public class WaylandAppLauncherActivity extends Activity {
         mAppsListView.setOnItemClickListener((parent, view, pos, id) -> {
             if (pos >= 0 && pos < mApps.size()) launchApp(mApps.get(pos));
         });
+        content.addView(mAppsRefresh);
 
-        // --- Processes tab ---
+        // Processes
         mProcsListView = new ListView(this);
         mProcsRefresh = new SwipeRefreshLayout(this);
         mProcsRefresh.addView(mProcsListView);
@@ -66,41 +114,24 @@ public class WaylandAppLauncherActivity extends Activity {
         mProcsListView.setOnItemClickListener((parent, view, pos, id) -> {
             if (pos >= 0 && pos < mProcs.size()) promptKillProcess(mProcs.get(pos));
         });
+        mProcsRefresh.setVisibility(View.GONE);
+        content.addView(mProcsRefresh);
 
-        // Start with apps tab
-        setContentView(mAppsRefresh);
+        root.addView(content, contentLp);
+        setContentView(root);
 
-        // Action bar tabs
-        ActionBar ab = getActionBar();
-        if (ab != null) {
-            ab.setNavigationMode(ActionBar.NAVIGATION_MODE_TABS);
-            ab.addTab(ab.newTab().setText("Apps").setTabListener(new TabSwitcher(0)));
-            ab.addTab(ab.newTab().setText("Processes").setTabListener(new TabSwitcher(1)));
-        }
-
-        refreshApps();
+        showTab(0);
     }
 
-    private class TabSwitcher implements ActionBar.TabListener {
-        private final int tab;
-        TabSwitcher(int tab) { this.tab = tab; }
+    private void showTab(int tab) {
+        mCurrentTab = tab;
+        mAppsRefresh.setVisibility(tab == 0 ? View.VISIBLE : View.GONE);
+        mProcsRefresh.setVisibility(tab == 1 ? View.VISIBLE : View.GONE);
 
-        @Override
-        public void onTabSelected(ActionBar.Tab t, FragmentTransaction ft) {
-            mCurrentTab = tab;
-            if (tab == 0) {
-                setContentView(mAppsRefresh);
-                refreshApps();
-            } else {
-                setContentView(mProcsRefresh);
-                refreshProcs();
-            }
-        }
+        mAppsTab.setAlpha(tab == 0 ? 1.0f : 0.5f);
+        mProcsTab.setAlpha(tab == 1 ? 1.0f : 0.5f);
 
-        @Override public void onTabUnselected(ActionBar.Tab t, FragmentTransaction ft) {}
-        @Override public void onTabReselected(ActionBar.Tab t, FragmentTransaction ft) {
-            if (tab == 0) refreshApps(); else refreshProcs();
-        }
+        if (tab == 0) refreshApps(); else refreshProcs();
     }
 
     // --- Apps ---
