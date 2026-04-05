@@ -30,6 +30,7 @@
 #include <gui/ITransactionCompletedListener.h>
 #include <ui/GraphicBuffer.h>
 
+#include "WaylandDecoration.h"
 #include "WaylandDmabuf.h"
 #include "WaylandDrm.h"
 #include "WaylandOutput.h"

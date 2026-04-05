@@ -47,6 +47,7 @@
 #include <gui/TransactionState.h>
 
 #include "WaylandDataDevice.h"
+#include "WaylandDecoration.h"
 #include "WaylandLayerShell.h"
 #include "WaylandSubcompositor.h"
 
@@ -222,6 +223,12 @@ bool WaylandCompositor::init(const sp<Looper>& /*looper*/) {
     // Register xdg_wm_base global.
     if (!WaylandXdgShell::createGlobal(mDisplay, this)) {
         ALOGE("Failed to create xdg_wm_base global");
+        return false;
+    }
+
+    // Register zxdg_decoration_manager_v1 global.
+    if (!WaylandDecoration::createGlobal(mDisplay, this)) {
+        ALOGE("Failed to create zxdg_decoration_manager_v1 global");
         return false;
     }
 
