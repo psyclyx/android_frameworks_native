@@ -490,10 +490,12 @@ public class WaylandWindowActivity extends Activity {
      * Positioned relative to the parent surface at (popupX, popupY).
      * Must be called on the UI thread.
      */
-    void addPopupWindow(int popupLayerId, int width, int height, int popupX, int popupY) {
+    void addPopupWindow(int popupLayerId, int width, int height, int popupX, int popupY,
+                        int parentLayerId) {
         Log.i(TAG, "addPopupWindow: popupLayerId=" + popupLayerId
                 + " pos=" + popupX + "," + popupY
-                + " size=" + width + "x" + height + " on host=" + mLayerId);
+                + " size=" + width + "x" + height
+                + " parent=" + parentLayerId + " on host=" + mLayerId);
 
         // Remove existing panel with same layerId if any
         removeDialogWindow(popupLayerId);
@@ -579,9 +581,15 @@ public class WaylandWindowActivity extends Activity {
         });
 
         // Position the popup relative to the parent's content area.
-        // The SurfaceView is inset by system bars, so offset accordingly.
+        // If the parent is a dialog panel, use its SurfaceView position;
+        // otherwise use the main window's SurfaceView.
         int[] svLoc = new int[2];
-        mSurfaceView.getLocationOnScreen(svLoc);
+        DialogPanel parentPanel = mDialogPanels.get(parentLayerId);
+        if (parentPanel != null) {
+            parentPanel.surfaceView.getLocationOnScreen(svLoc);
+        } else {
+            mSurfaceView.getLocationOnScreen(svLoc);
+        }
 
         int panelW = width > 0 ? width : 200;
         int panelH = height > 0 ? height : 200;

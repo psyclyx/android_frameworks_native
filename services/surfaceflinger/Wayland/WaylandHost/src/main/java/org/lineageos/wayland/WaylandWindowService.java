@@ -69,9 +69,10 @@ public class WaylandWindowService extends Service {
                 if (hostActivity != null) {
                     final WaylandWindowActivity host = hostActivity;
                     final boolean isPopup = popupX >= 0 && popupY >= 0;
+                    final int parentId = parentLayerId;
                     host.runOnUiThread(() -> {
                         if (isPopup) {
-                            host.addPopupWindow(layerId, width, height, popupX, popupY);
+                            host.addPopupWindow(layerId, width, height, popupX, popupY, parentId);
                         } else {
                             host.addDialogWindow(layerId, displayTitle, width, height);
                         }
