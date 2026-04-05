@@ -215,33 +215,57 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
     }
 
     // Deferred window creation: on first commit with a buffer, if this surface
-    // has an xdg_toplevel role, create the Android window now. By this point we
-    // know title, app_id, parent, and buffer dimensions.
-    if (surface->xdgSurface && surface->xdgToplevel && surface->currentBuffer) {
+    // has an xdg role (toplevel or popup), create the Android window now.
+    if (surface->xdgSurface && surface->currentBuffer) {
         auto* xdgSurf = static_cast<WaylandXdgSurface*>(
                 wl_resource_get_user_data(surface->xdgSurface));
         if (xdgSurf && !xdgSurf->mapped) {
-            xdgSurf->mapped = true;
+            if (xdgSurf->toplevel) {
+                xdgSurf->mapped = true;
 
-            // Resolve parent layerId (-1 = no parent = top-level Activity)
-            int parentLayerId = -1;
-            if (xdgSurf->parentToplevel) {
-                auto* parentXdg = static_cast<WaylandXdgSurface*>(
-                        wl_resource_get_user_data(xdgSurf->parentToplevel));
-                if (parentXdg) {
-                    WaylandSurface* parentWs =
-                            surface->compositor->findSurface(parentXdg->wlSurface);
-                    if (parentWs) {
-                        parentLayerId = static_cast<int>(parentWs->layerId);
+                // Resolve parent layerId (-1 = no parent = top-level Activity)
+                int parentLayerId = -1;
+                if (xdgSurf->parentToplevel) {
+                    auto* parentXdg = static_cast<WaylandXdgSurface*>(
+                            wl_resource_get_user_data(xdgSurf->parentToplevel));
+                    if (parentXdg) {
+                        WaylandSurface* parentWs =
+                                surface->compositor->findSurface(parentXdg->wlSurface);
+                        if (parentWs) {
+                            parentLayerId = static_cast<int>(parentWs->layerId);
+                        }
                     }
                 }
-            }
 
-            surface->compositor->requestCreateWindow(
-                    static_cast<int>(surface->layerId), surface->handle,
-                    xdgSurf->title.empty() ? nullptr : xdgSurf->title.c_str(),
-                    xdgSurf->appId.empty() ? nullptr : xdgSurf->appId.c_str(),
-                    parentLayerId, 0, 0);
+                surface->compositor->requestCreateWindow(
+                        static_cast<int>(surface->layerId), surface->handle,
+                        xdgSurf->title.empty() ? nullptr : xdgSurf->title.c_str(),
+                        xdgSurf->appId.empty() ? nullptr : xdgSurf->appId.c_str(),
+                        parentLayerId, 0, 0);
+            } else if (xdgSurf->popup) {
+                xdgSurf->mapped = true;
+
+                auto* popup = static_cast<WaylandXdgPopup*>(
+                        wl_resource_get_user_data(xdgSurf->popup));
+                if (popup) {
+                    // Find the parent surface's layerId
+                    int parentLayerId = -1;
+                    if (popup->parentSurface) {
+                        WaylandSurface* parentWs =
+                                surface->compositor->findSurface(popup->parentSurface);
+                        if (parentWs) {
+                            parentLayerId = static_cast<int>(parentWs->layerId);
+                        }
+                    }
+
+                    surface->compositor->requestCreateWindow(
+                            static_cast<int>(surface->layerId), surface->handle,
+                            nullptr, nullptr,
+                            parentLayerId,
+                            popup->positioner.width, popup->positioner.height,
+                            popup->x, popup->y);
+                }
+            }
         }
     }
 

@@ -481,6 +481,129 @@ public class WaylandWindowActivity extends Activity {
     }
 
     /**
+     * Create a TYPE_APPLICATION_SUB_PANEL sub-window for a popup (menu/tooltip).
+     * Positioned relative to the parent surface at (popupX, popupY).
+     * Must be called on the UI thread.
+     */
+    void addPopupWindow(int popupLayerId, int width, int height, int popupX, int popupY) {
+        Log.i(TAG, "addPopupWindow: popupLayerId=" + popupLayerId
+                + " pos=" + popupX + "," + popupY
+                + " size=" + width + "x" + height + " on host=" + mLayerId);
+
+        FrameLayout container = new FrameLayout(this);
+        SurfaceView sv = new SurfaceView(this);
+        container.addView(sv, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+
+        // Forward touch events to the popup's layerId
+        container.setOnTouchListener((v, event) -> {
+            if (event.getActionMasked() == MotionEvent.ACTION_OUTSIDE) {
+                // Touch outside the popup -> dismiss it
+                IWaylandWindowCallback callback = getCallbackFor(popupLayerId);
+                if (callback != null) {
+                    try {
+                        callback.onWindowClosed(popupLayerId);
+                    } catch (RemoteException e) {
+                        Log.w(TAG, "Failed to send popup dismiss", e);
+                    }
+                }
+                return true;
+            }
+
+            IWaylandWindowCallback callback = getCallbackFor(popupLayerId);
+            if (callback == null) return false;
+
+            long timeMs = event.getEventTime();
+            float x = event.getX();
+            float y = event.getY();
+
+            try {
+                switch (event.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        callback.onPointerMotion(popupLayerId, timeMs, x, y);
+                        callback.onPointerButton(popupLayerId, timeMs, BTN_LEFT, true);
+                        break;
+                    case MotionEvent.ACTION_MOVE:
+                        callback.onPointerMotion(popupLayerId, timeMs, x, y);
+                        break;
+                    case MotionEvent.ACTION_UP:
+                        callback.onPointerMotion(popupLayerId, timeMs, x, y);
+                        callback.onPointerButton(popupLayerId, timeMs, BTN_LEFT, false);
+                        break;
+                    case MotionEvent.ACTION_CANCEL:
+                        callback.onPointerButton(popupLayerId, timeMs, BTN_LEFT, false);
+                        break;
+                }
+            } catch (RemoteException e) {
+                Log.w(TAG, "Failed to forward popup touch", e);
+            }
+            return true;
+        });
+
+        sv.getHolder().addCallback(new SurfaceHolder.Callback() {
+            @Override
+            public void surfaceCreated(SurfaceHolder holder) {
+                SurfaceControl sc = sv.getSurfaceControl();
+                if (sc != null && sc.isValid()) {
+                    WaylandWindowService service = WaylandWindowService.getInstance();
+                    if (service != null) {
+                        service.onWindowSurfaceReady(popupLayerId, sc);
+                    }
+                }
+            }
+
+            @Override
+            public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) {
+                IWaylandWindowCallback callback = getCallbackFor(popupLayerId);
+                if (callback != null) {
+                    try {
+                        callback.onWindowResized(popupLayerId, w, h);
+                    } catch (RemoteException e) {
+                        Log.w(TAG, "Failed to forward popup resize", e);
+                    }
+                }
+            }
+
+            @Override
+            public void surfaceDestroyed(SurfaceHolder holder) {}
+        });
+
+        // Position the popup relative to the parent's content area.
+        // The SurfaceView is inset by system bars, so offset accordingly.
+        int[] svLoc = new int[2];
+        mSurfaceView.getLocationOnScreen(svLoc);
+
+        int panelW = width > 0 ? width : 200;
+        int panelH = height > 0 ? height : 200;
+
+        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                panelW, panelH,
+                WindowManager.LayoutParams.TYPE_APPLICATION_SUB_PANEL,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                        | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+                PixelFormat.TRANSLUCENT);
+        lp.gravity = Gravity.TOP | Gravity.LEFT;
+        lp.x = svLoc[0] + popupX;
+        lp.y = svLoc[1] + popupY;
+        lp.token = getWindow().getDecorView().getWindowToken();
+        lp.setTitle("WaylandPopup:" + popupLayerId);
+
+        getWindowManager().addView(container, lp);
+
+        DialogPanel panel = new DialogPanel(popupLayerId, container, sv);
+        mDialogPanels.put(popupLayerId, panel);
+
+        WaylandWindowService service = WaylandWindowService.getInstance();
+        if (service != null) {
+            service.registerDialogHost(popupLayerId, this);
+        }
+
+        Log.i(TAG, "Popup panel added: layerId=" + popupLayerId
+                + " at " + lp.x + "," + lp.y + " size=" + panelW + "x" + panelH);
+    }
+
+    /**
      * Remove a dialog sub-window. Must be called on the UI thread.
      */
     void removeDialogWindow(int dialogLayerId) {

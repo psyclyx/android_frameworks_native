@@ -66,6 +66,9 @@ struct WaylandSurface {
     struct wl_resource* xdgToplevel = nullptr;
     uint32_t configureSerial = 0;
 
+    // XDG popup role resource (set when get_popup is called)
+    struct wl_resource* xdgPopup = nullptr;
+
     // Layer shell role resource (set when get_layer_surface is called)
     struct wl_resource* layerSurface = nullptr;
 

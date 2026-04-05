@@ -496,6 +496,9 @@ public:
                         String16("org.lineageos.wayland.IWaylandWindowCallback"));
                 int32_t layerId = data.readInt32();
                 ALOGI("onWindowClosed: layerId=%d", layerId);
+                if (mCompositor) {
+                    mCompositor->dispatchPopupDismiss(layerId);
+                }
                 if (reply) reply->writeNoException();
                 return NO_ERROR;
             }
@@ -567,7 +570,8 @@ private:
 
 void WaylandCompositor::requestCreateWindow(int layerId, const sp<IBinder>& /*layerHandle*/,
                                              const char* title, const char* appId,
-                                             int parentLayerId, int width, int height) {
+                                             int parentLayerId, int width, int height,
+                                             int popupX, int popupY) {
     sp<IServiceManager> sm = defaultServiceManager();
     if (!sm) {
         ALOGE("requestCreateWindow: no service manager");
@@ -589,6 +593,8 @@ void WaylandCompositor::requestCreateWindow(int layerId, const sp<IBinder>& /*la
     data.writeInt32(width);
     data.writeInt32(height);
     data.writeInt32(parentLayerId);
+    data.writeInt32(popupX);
+    data.writeInt32(popupY);
     sp<WaylandWindowCallback> callback = sp<WaylandWindowCallback>::make(this);
     data.writeStrongBinder(callback);
 
@@ -749,6 +755,14 @@ void WaylandCompositor::dispatchKey(int layerId, uint32_t timeMs, uint32_t evdev
     if (mWakeEventFd >= 0) { uint64_t v=1; write(mWakeEventFd, &v, sizeof(v)); }
 }
 
+void WaylandCompositor::dispatchPopupDismiss(int layerId) {
+    {
+        std::lock_guard<std::mutex> lock(mCallbacksMutex);
+        mPendingEvents.push_back({PendingEvent::PopupDismiss, layerId, 0, 0, 0, 0, 0, false});
+    }
+    if (mWakeEventFd >= 0) { uint64_t v=1; write(mWakeEventFd, &v, sizeof(v)); }
+}
+
 void WaylandCompositor::dispatchEvents() {
     wl_event_loop_dispatch(mEventLoop, 0);
     wl_display_flush_clients(mDisplay);
@@ -871,6 +885,14 @@ void WaylandCompositor::doFireFrameCallbacksAndReleases() {
                     mSeat->setFocus(ws->resource);
                     mSeat->sendKey(static_cast<uint32_t>(ev.i1),
                             static_cast<uint32_t>(ev.i2), ev.b1);
+                }
+                break;
+            }
+            case PendingEvent::PopupDismiss: {
+                WaylandSurface* ws = findSurfaceByLayerId(ev.layerId);
+                if (ws && ws->xdgPopup) {
+                    xdg_popup_send_popup_done(ws->xdgPopup);
+                    ALOGI("Sent popup_done for layer %d", ev.layerId);
                 }
                 break;
             }

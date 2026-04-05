@@ -26,6 +26,25 @@ namespace android {
 
 class WaylandCompositor;
 
+// Per-positioner state for popup placement.
+struct WaylandXdgPositioner {
+    int32_t width = 0, height = 0;           // set_size
+    int32_t anchorX = 0, anchorY = 0;        // set_anchor_rect
+    int32_t anchorWidth = 0, anchorHeight = 0;
+    uint32_t anchor = 0;                      // set_anchor (edge/corner)
+    uint32_t gravity = 0;                     // set_gravity
+    int32_t offsetX = 0, offsetY = 0;        // set_offset
+};
+
+// Per-xdg_popup state.
+struct WaylandXdgPopup {
+    WaylandCompositor* compositor = nullptr;
+    struct wl_resource* resource = nullptr;   // xdg_popup resource
+    struct wl_resource* parentSurface = nullptr; // parent wl_surface
+    WaylandXdgPositioner positioner;
+    int32_t x = 0, y = 0; // computed position relative to parent
+};
+
 // Per-xdg_surface state: tracks the wl_surface resource and pending configure serial.
 struct WaylandXdgSurface {
     WaylandCompositor* compositor = nullptr;
@@ -110,6 +129,19 @@ private:
     static const struct xdg_toplevel_interface kToplevelImpl;
 
     static void sendToplevelConfigure(struct wl_resource* toplevel, struct wl_resource* xdgSurface);
+
+    // xdg_popup
+    static void popupDestroy(struct wl_client* client, struct wl_resource* resource);
+    static void popupGrab(struct wl_client* client, struct wl_resource* resource,
+                           struct wl_resource* seat, uint32_t serial);
+    static void popupReposition(struct wl_client* client, struct wl_resource* resource,
+                                 struct wl_resource* positioner, uint32_t token);
+    static void onPopupDestroy(struct wl_resource* resource);
+
+    static const struct xdg_popup_interface kPopupImpl;
+
+    // Compute popup position from positioner + anchor geometry.
+    static void computePopupPosition(const WaylandXdgPositioner& pos, int32_t* outX, int32_t* outY);
 };
 
 } // namespace android

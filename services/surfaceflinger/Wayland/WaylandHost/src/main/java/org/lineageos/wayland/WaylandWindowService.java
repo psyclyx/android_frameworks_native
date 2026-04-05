@@ -42,10 +42,12 @@ public class WaylandWindowService extends Service {
         @Override
         public void createWindow(int layerId, String title, String appId,
                                  int width, int height, int parentLayerId,
+                                 int popupX, int popupY,
                                  IWaylandWindowCallback callback) {
             Log.i(TAG, "createWindow: layerId=" + layerId + " title=" + title
                     + " appId=" + appId + " size=" + width + "x" + height
-                    + " parent=" + parentLayerId);
+                    + " parent=" + parentLayerId
+                    + " popup=" + popupX + "," + popupY);
 
             synchronized (mCallbacks) {
                 mCallbacks.put(layerId, callback);
@@ -66,8 +68,14 @@ public class WaylandWindowService extends Service {
                 }
                 if (hostActivity != null) {
                     final WaylandWindowActivity host = hostActivity;
-                    host.runOnUiThread(() ->
-                            host.addDialogWindow(layerId, displayTitle, width, height));
+                    final boolean isPopup = popupX >= 0 && popupY >= 0;
+                    host.runOnUiThread(() -> {
+                        if (isPopup) {
+                            host.addPopupWindow(layerId, width, height, popupX, popupY);
+                        } else {
+                            host.addDialogWindow(layerId, displayTitle, width, height);
+                        }
+                    });
                     return;
                 }
                 Log.w(TAG, "Parent activity not found for layerId=" + parentLayerId

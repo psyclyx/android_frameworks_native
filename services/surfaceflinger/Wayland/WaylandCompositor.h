@@ -73,9 +73,12 @@ public:
     void sendToplevelConfigure(int layerId, int32_t width, int32_t height);
 
     // Request the Android WaylandWindowService to create/destroy a window.
+    // parentLayerId: -1 = top-level Activity, >=0 = dialog/popup sub-window
+    // popupX/popupY: position for popups relative to parent (ignored if < 0)
     void requestCreateWindow(int layerId, const sp<IBinder>& layerHandle,
                              const char* title, const char* appId,
-                             int parentLayerId, int width, int height);
+                             int parentLayerId, int width, int height,
+                             int popupX = -1, int popupY = -1);
     void requestDestroyWindow(int layerId);
     void requestSetTitle(int layerId, const char* title);
     void requestSetExclusiveZones(int top, int right, int bottom, int left);
@@ -106,6 +109,7 @@ public:
     void dispatchPointerMotion(int layerId, uint32_t timeMs, double x, double y);
     void dispatchPointerButton(int layerId, uint32_t timeMs, uint32_t button, bool pressed);
     void dispatchKey(int layerId, uint32_t timeMs, uint32_t evdevKey, bool pressed);
+    void dispatchPopupDismiss(int layerId);
 
 private:
     explicit WaylandCompositor(SurfaceFlinger& flinger);
@@ -151,7 +155,7 @@ private:
     // Pending configure events (queued from binder thread, dispatched on Wayland thread).
     // Pending events queued from other threads, dispatched on Wayland thread.
     struct PendingEvent {
-        enum Type { Configure, PointerMotion, PointerButton, Key };
+        enum Type { Configure, PointerMotion, PointerButton, Key, PopupDismiss };
         Type type;
         int layerId;
         int32_t i1, i2, i3; // generic int args

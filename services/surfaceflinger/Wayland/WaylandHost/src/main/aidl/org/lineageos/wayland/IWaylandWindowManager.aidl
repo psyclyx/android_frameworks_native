@@ -8,6 +8,7 @@ interface IWaylandWindowManager {
     // providing the window's SurfaceControl handle for reparenting.
     void createWindow(int layerId, String title, String appId,
                       int width, int height, int parentLayerId,
+                      int popupX, int popupY,
                       IWaylandWindowCallback callback);
 
     // Called when the xdg_toplevel is destroyed.
