@@ -237,11 +237,27 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
                     }
                 }
 
+                // Get buffer dimensions for dialog sizing
+                int bufW = 0, bufH = 0;
+                if (surface->currentBuffer) {
+                    auto* bufBase = static_cast<WaylandBufferBase*>(
+                            wl_resource_get_user_data(surface->currentBuffer));
+                    if (bufBase && bufBase->bufferType == WaylandBufferType::Dmabuf) {
+                        auto* dmabuf = static_cast<WaylandDmabufBuffer*>(bufBase);
+                        bufW = dmabuf->width;
+                        bufH = dmabuf->height;
+                    } else if (bufBase && bufBase->bufferType == WaylandBufferType::Shm) {
+                        auto* shm = static_cast<WaylandShmBuffer*>(bufBase);
+                        bufW = shm->width;
+                        bufH = shm->height;
+                    }
+                }
+
                 surface->compositor->requestCreateWindow(
                         static_cast<int>(surface->layerId), surface->handle,
                         xdgSurf->title.empty() ? nullptr : xdgSurf->title.c_str(),
                         xdgSurf->appId.empty() ? nullptr : xdgSurf->appId.c_str(),
-                        parentLayerId, 0, 0);
+                        parentLayerId, bufW, bufH);
             } else if (xdgSurf->popup) {
                 xdgSurf->mapped = true;
 

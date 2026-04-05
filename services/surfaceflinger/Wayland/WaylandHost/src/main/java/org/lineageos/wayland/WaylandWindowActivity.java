@@ -354,7 +354,11 @@ public class WaylandWindowActivity extends Activity {
      */
     void addDialogWindow(int dialogLayerId, String title, int width, int height) {
         Log.i(TAG, "addDialogWindow: dialogLayerId=" + dialogLayerId
-                + " title=" + title + " on host=" + mLayerId);
+                + " title=" + title + " size=" + width + "x" + height
+                + " on host=" + mLayerId);
+
+        // Remove existing panel with same layerId if any (e.g. popup recreated)
+        removeDialogWindow(dialogLayerId);
 
         // Container: FrameLayout wrapping a SurfaceView
         FrameLayout container = new FrameLayout(this);
@@ -489,6 +493,9 @@ public class WaylandWindowActivity extends Activity {
         Log.i(TAG, "addPopupWindow: popupLayerId=" + popupLayerId
                 + " pos=" + popupX + "," + popupY
                 + " size=" + width + "x" + height + " on host=" + mLayerId);
+
+        // Remove existing panel with same layerId if any
+        removeDialogWindow(popupLayerId);
 
         FrameLayout container = new FrameLayout(this);
         SurfaceView sv = new SurfaceView(this);
