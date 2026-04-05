@@ -238,6 +238,11 @@ bool WaylandCompositor::init(const sp<Looper>& /*looper*/) {
         return false;
     }
 
+    // Output scale is set lazily on first client bind (WaylandOutput::bind
+    // queries the display). For now, default to 2 for phone screens.
+    // TODO: query display dimensions once SF is fully initialized.
+    mOutputScale = 2;
+
     // Register wl_shm global.
     if (!WaylandShm::createGlobal(mDisplay, this)) {
         ALOGE("Failed to create wl_shm global");
@@ -848,7 +853,9 @@ void WaylandCompositor::doFireFrameCallbacksAndReleases() {
                 wl_array_init(&states);
                 uint32_t* s = static_cast<uint32_t*>(wl_array_add(&states, sizeof(uint32_t)));
                 *s = 4; // XDG_TOPLEVEL_STATE_ACTIVATED
-                xdg_toplevel_send_configure(ws->xdgToplevel, ev.i1, ev.i2, &states);
+                // Configure dimensions are in logical coords (physical / scale).
+                xdg_toplevel_send_configure(ws->xdgToplevel,
+                        ev.i1 / mOutputScale, ev.i2 / mOutputScale, &states);
                 wl_array_release(&states);
                 // Use the xdg_surface's serial counter (same one used for initial configure)
                 // to avoid duplicate serials which violate the xdg_surface protocol.
@@ -866,7 +873,11 @@ void WaylandCompositor::doFireFrameCallbacksAndReleases() {
                 WaylandSurface* ws = findSurfaceByLayerId(ev.layerId);
                 if (ws && ws->resource && mSeat) {
                     mSeat->setFocus(ws->resource);
-                    mSeat->sendPointerMotion(static_cast<uint32_t>(ev.i1), ev.f1, ev.f2);
+                    // Divide by output scale: Android sends physical pixels,
+                    // Wayland clients expect logical coordinates.
+                    float sx = ev.f1 / static_cast<float>(mOutputScale);
+                    float sy = ev.f2 / static_cast<float>(mOutputScale);
+                    mSeat->sendPointerMotion(static_cast<uint32_t>(ev.i1), sx, sy);
                 }
                 break;
             }

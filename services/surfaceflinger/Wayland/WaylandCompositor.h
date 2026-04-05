@@ -55,6 +55,7 @@ public:
     SurfaceFlinger& flinger() { return mFlinger; }
     WaylandSeat* seat() { return mSeat.get(); }
     struct wl_display* display() { return mDisplay; }
+    int32_t outputScale() const { return mOutputScale; }
     void removeSurface(struct wl_resource* resource);
 
     // Look up a WaylandSurface by its wl_surface resource.
@@ -135,6 +136,7 @@ private:
     struct wl_event_loop* mEventLoop = nullptr;
     int mEventLoopFd = -1;
     uint32_t mNextSurfaceNum = 0;
+    int32_t mOutputScale = 1; // wl_output scale factor
 
     std::unique_ptr<WaylandSeat> mSeat;
 

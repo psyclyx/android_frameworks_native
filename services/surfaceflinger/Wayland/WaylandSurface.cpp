@@ -274,12 +274,16 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
                         }
                     }
 
+                    // Popup position and size are in logical coords;
+                    // multiply by output scale for physical pixel positioning.
+                    int32_t scale = surface->compositor->outputScale();
                     surface->compositor->requestCreateWindow(
                             static_cast<int>(surface->layerId), surface->handle,
                             nullptr, nullptr,
                             parentLayerId,
-                            popup->positioner.width, popup->positioner.height,
-                            popup->x, popup->y);
+                            popup->positioner.width * scale,
+                            popup->positioner.height * scale,
+                            popup->x * scale, popup->y * scale);
                 }
             }
         }
