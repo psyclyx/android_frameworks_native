@@ -363,6 +363,8 @@ public class WaylandWindowActivity extends Activity {
         // Container: FrameLayout wrapping a SurfaceView
         FrameLayout container = new FrameLayout(this);
         SurfaceView sv = new SurfaceView(this);
+        sv.getHolder().setFormat(PixelFormat.TRANSLUCENT);
+        sv.setZOrderOnTop(true);
         container.addView(sv, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
@@ -499,6 +501,8 @@ public class WaylandWindowActivity extends Activity {
 
         FrameLayout container = new FrameLayout(this);
         SurfaceView sv = new SurfaceView(this);
+        sv.getHolder().setFormat(PixelFormat.TRANSLUCENT);
+        sv.setZOrderOnTop(true);
         container.addView(sv, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));

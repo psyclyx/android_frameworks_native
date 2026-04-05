@@ -299,20 +299,14 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
                         }
                     }
 
-                    // Popup position is in logical coords relative to parent's
-                    // content area. Offset by -geometry origin so the content
-                    // (not the shadow) lands at the correct position.
-                    int32_t posX = popup->x * scale;
-                    int32_t posY = popup->y * scale;
-                    if (xdgSurf->geomX > 0 || xdgSurf->geomY > 0) {
-                        posX -= xdgSurf->geomX * scale;
-                        posY -= xdgSurf->geomY * scale;
-                    }
-
+                    // Popup position is in logical coords relative to parent.
+                    // The popup window is sized to the full buffer (including
+                    // shadow), so no geometry adjustment needed here.
                     surface->compositor->requestCreateWindow(
                             static_cast<int>(surface->layerId), surface->handle,
                             nullptr, nullptr,
-                            parentLayerId, popW, popH, posX, posY);
+                            parentLayerId, popW, popH,
+                            popup->x * scale, popup->y * scale);
                 }
             }
         }
