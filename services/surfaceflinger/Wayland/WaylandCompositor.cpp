@@ -873,6 +873,10 @@ void WaylandCompositor::doFireFrameCallbacksAndReleases() {
                 auto* xdgSurf = static_cast<WaylandXdgSurface*>(
                         wl_resource_get_user_data(ws->xdgSurface));
                 if (xdgSurf) {
+                    // Track the configured size so we can defer showing
+                    // the buffer until the client commits at this size.
+                    xdgSurf->configuredWidth = ev.i1 / mOutputScale;
+                    xdgSurf->configuredHeight = ev.i2 / mOutputScale;
                     xdgSurf->pendingConfigureSerial++;
                     xdg_surface_send_configure(ws->xdgSurface,
                                                xdgSurf->pendingConfigureSerial);

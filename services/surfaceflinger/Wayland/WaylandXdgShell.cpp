@@ -275,14 +275,26 @@ void WaylandXdgShell::xdgSurfaceSetWindowGeometry(struct wl_client* /*client*/,
 void WaylandXdgShell::xdgSurfaceAckConfigure(struct wl_client* /*client*/,
                                                struct wl_resource* resource, uint32_t serial) {
     auto* xdgSurface = static_cast<WaylandXdgSurface*>(wl_resource_get_user_data(resource));
-    // Accept ack; MVP does not gate commits on configure state.
-    (void)serial;
-    (void)xdgSurface;
+    if (xdgSurface) {
+        xdgSurface->ackedConfigureSerial = serial;
+    }
 }
 
 void WaylandXdgShell::onXdgSurfaceDestroy(struct wl_resource* resource) {
     auto* xdgSurface = static_cast<WaylandXdgSurface*>(wl_resource_get_user_data(resource));
-    delete xdgSurface;
+    if (xdgSurface) {
+        // Destroy the Android window when the xdg_surface is destroyed.
+        // This is the correct lifetime — the Android window maps to the
+        // xdg_surface role, not the individual toplevel/popup sub-role.
+        if (xdgSurface->mapped) {
+            WaylandSurface* ws = xdgSurface->compositor->findSurface(xdgSurface->wlSurface);
+            if (ws) {
+                xdgSurface->compositor->requestDestroyWindow(
+                        static_cast<int>(ws->layerId));
+            }
+        }
+        delete xdgSurface;
+    }
 }
 
 // --- xdg_toplevel ---
@@ -318,9 +330,10 @@ void WaylandXdgShell::onToplevelDestroy(struct wl_resource* resource) {
     auto* xdgSurface = static_cast<WaylandXdgSurface*>(wl_resource_get_user_data(resource));
     if (!xdgSurface) return;
 
+    // Clear references. The Android window is destroyed in
+    // onXdgSurfaceDestroy, which always follows toplevel destruction.
     WaylandSurface* ws = xdgSurface->compositor->findSurface(xdgSurface->wlSurface);
     if (ws) {
-        xdgSurface->compositor->requestDestroyWindow(static_cast<int>(ws->layerId));
         ws->xdgToplevel = nullptr;
     }
     xdgSurface->toplevel = nullptr;
@@ -445,12 +458,13 @@ void WaylandXdgShell::popupReposition(struct wl_client* /*client*/,
 void WaylandXdgShell::onPopupDestroy(struct wl_resource* resource) {
     auto* popup = static_cast<WaylandXdgPopup*>(wl_resource_get_user_data(resource));
     if (popup) {
-        // Clear the dangling xdgPopup pointer on the owning WaylandSurface
-        // and destroy the Android popup window.
+        // Clear the dangling xdgPopup pointer on the owning WaylandSurface.
+        // Don't destroy the Android window here — the window lifetime is tied
+        // to the xdg_surface (onXdgSurfaceDestroy), not the xdg_popup.
+        // This avoids flicker from rapid popup destroy/recreate cycles
+        // (e.g. GTK4 measuring popups).
         if (popup->ownerSurface) {
             popup->ownerSurface->xdgPopup = nullptr;
-            popup->compositor->requestDestroyWindow(
-                    static_cast<int>(popup->ownerSurface->layerId));
         }
         delete popup;
     }

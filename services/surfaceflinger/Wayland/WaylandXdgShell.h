@@ -56,9 +56,13 @@ struct WaylandXdgSurface {
     struct wl_resource* popup = nullptr;         // xdg_popup (if role assigned)
     struct wl_resource* parentToplevel = nullptr; // set_parent target (for dialogs)
     uint32_t pendingConfigureSerial = 0;
+    uint32_t ackedConfigureSerial = 0;
     std::string title;
     std::string appId;
     bool mapped = false; // true after first commit triggers window creation
+    // Configure state: the last size we sent to the client via configure.
+    // Used to defer showing the buffer until the client commits at the right size.
+    int32_t configuredWidth = 0, configuredHeight = 0;
     // Window geometry (surface-local coords, excludes shadows/CSD borders)
     int32_t geomX = 0, geomY = 0, geomWidth = 0, geomHeight = 0;
 };
