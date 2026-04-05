@@ -139,6 +139,7 @@ class TimeStats;
 class FrameTracer;
 class ScreenCapturer;
 class WaylandCompositor;
+class WaylandLayerShell;
 class WindowInfosListenerInvoker;
 
 using ::aidl::android::hardware::drm::HdcpLevels;
@@ -377,6 +378,7 @@ private:
     friend class RegionSamplingThread;
     friend class SurfaceComposerAIDL;
     friend class WaylandCompositor;
+    friend class WaylandLayerShell;
     friend class WaylandOutput;
     friend struct WaylandSurface;
 

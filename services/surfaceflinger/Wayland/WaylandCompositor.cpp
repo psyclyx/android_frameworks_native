@@ -47,6 +47,7 @@
 #include <gui/TransactionState.h>
 
 #include "WaylandDataDevice.h"
+#include "WaylandLayerShell.h"
 #include "WaylandSubcompositor.h"
 
 #include "FrontEnd/LayerCreationArgs.h"
@@ -252,6 +253,12 @@ bool WaylandCompositor::init(const sp<Looper>& /*looper*/) {
     // Register wl_subcompositor global.
     if (!WaylandSubcompositor::createGlobal(mDisplay, this)) {
         ALOGE("Failed to create wl_subcompositor global");
+        return false;
+    }
+
+    // Register zwlr_layer_shell_v1 global.
+    if (!WaylandLayerShell::createGlobal(mDisplay, this)) {
+        ALOGE("Failed to create zwlr_layer_shell_v1 global");
         return false;
     }
 

@@ -25,6 +25,7 @@
 #include "WaylandSurface.h"
 #include "WaylandCompositor.h"
 #include "WaylandDmabuf.h"
+#include "WaylandLayerShell.h"
 #include "WaylandShm.h"
 
 #include "Layer.h"
@@ -210,6 +211,20 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
         }
         surface->bufferAttached = false;
         surface->pendingBuffer = nullptr;
+    }
+
+    // Layer-shell: send initial configure on first commit (no buffer),
+    // and apply layout on subsequent commits with a buffer.
+    if (surface->layerSurface) {
+        auto* ls = static_cast<WaylandLayerSurface*>(
+                wl_resource_get_user_data(surface->layerSurface));
+        if (ls) {
+            if (!ls->configured) {
+                WaylandLayerShell::sendConfigure(ls);
+            } else if (surface->currentBuffer) {
+                WaylandLayerShell::applyLayout(ls);
+            }
+        }
     }
 
     // Queue frame callbacks for VSYNC-aligned delivery after SF composite.

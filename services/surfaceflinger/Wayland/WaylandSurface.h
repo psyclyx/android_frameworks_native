@@ -66,6 +66,9 @@ struct WaylandSurface {
     struct wl_resource* xdgToplevel = nullptr;
     uint32_t configureSerial = 0;
 
+    // Layer shell role resource (set when get_layer_surface is called)
+    struct wl_resource* layerSurface = nullptr;
+
     // Pending state (applied on commit)
     struct wl_resource* pendingBuffer = nullptr;
     std::vector<struct wl_resource*> pendingFrameCallbacks;
