@@ -33,17 +33,15 @@ public class BootReceiver extends BroadcastReceiver {
         }
 
         try {
-            String[] cmds = {
-                "mount -t proc proc " + chrootPath + "/proc 2>/dev/null",
-                "mount -o bind /dev " + chrootPath + "/dev 2>/dev/null",
-                "mount -o bind /dev/pts " + chrootPath + "/dev/pts 2>/dev/null",
-                "mount -t tmpfs tmpfs " + chrootPath + "/tmp 2>/dev/null",
-                "mkdir -p " + chrootPath + "/run/wayland",
-                "mount -o bind /data/wayland " + chrootPath + "/run/wayland 2>/dev/null",
-            };
-            for (String cmd : cmds) {
-                Runtime.getRuntime().exec(new String[]{"su", "0", "sh", "-c", cmd}).waitFor();
-            }
+            // Single su call with mountpoint checks to avoid stacking mounts
+            String script = "C=" + chrootPath + ";"
+                + " mountpoint -q $C/proc       || mount -t proc proc $C/proc;"
+                + " mountpoint -q $C/dev        || mount -o bind /dev $C/dev;"
+                + " mountpoint -q $C/dev/pts    || mount -o bind /dev/pts $C/dev/pts;"
+                + " mountpoint -q $C/tmp        || mount -t tmpfs tmpfs $C/tmp;"
+                + " mkdir -p $C/run/wayland;"
+                + " mountpoint -q $C/run/wayland || mount -o bind /data/wayland $C/run/wayland;";
+            Runtime.getRuntime().exec(new String[]{"su", "0", "sh", "-c", script}).waitFor();
             Log.i(TAG, "Chroot mounts set up for " + chrootPath);
         } catch (IOException | InterruptedException e) {
             Log.e(TAG, "Failed to set up chroot mounts", e);
