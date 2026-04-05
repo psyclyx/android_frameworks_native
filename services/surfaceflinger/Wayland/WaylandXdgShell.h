@@ -74,6 +74,7 @@ private:
     static void xdgSurfaceAckConfigure(struct wl_client* client, struct wl_resource* resource,
                                         uint32_t serial);
     static void onXdgSurfaceDestroy(struct wl_resource* resource);
+    static void onToplevelDestroy(struct wl_resource* resource);
 
     static const struct xdg_surface_interface kXdgSurfaceImpl;
 

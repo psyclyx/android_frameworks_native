@@ -159,7 +159,7 @@ void WaylandXdgShell::xdgSurfaceGetToplevel(struct wl_client* client,
     }
 
     xdgSurface->toplevel = toplevel;
-    wl_resource_set_implementation(toplevel, &kToplevelImpl, xdgSurface, nullptr);
+    wl_resource_set_implementation(toplevel, &kToplevelImpl, xdgSurface, onToplevelDestroy);
 
     // Store toplevel reference on the WaylandSurface.
     WaylandSurface* ws2 = xdgSurface->compositor->findSurface(xdgSurface->wlSurface);
@@ -235,14 +235,22 @@ void WaylandXdgShell::toplevelDestroy(struct wl_client* /*client*/,
                                        struct wl_resource* resource) {
     auto* xdgSurface = static_cast<WaylandXdgSurface*>(wl_resource_get_user_data(resource));
     if (xdgSurface) {
-        // Tell Android to close the window
-        WaylandSurface* ws = xdgSurface->compositor->findSurface(xdgSurface->wlSurface);
-        if (ws) {
-            xdgSurface->compositor->requestDestroyWindow(static_cast<int>(ws->layerId));
-        }
         xdgSurface->toplevel = nullptr;
     }
+    // wl_resource_destroy triggers onToplevelDestroy which does the actual cleanup.
     wl_resource_destroy(resource);
+}
+
+void WaylandXdgShell::onToplevelDestroy(struct wl_resource* resource) {
+    auto* xdgSurface = static_cast<WaylandXdgSurface*>(wl_resource_get_user_data(resource));
+    if (!xdgSurface) return;
+
+    WaylandSurface* ws = xdgSurface->compositor->findSurface(xdgSurface->wlSurface);
+    if (ws) {
+        xdgSurface->compositor->requestDestroyWindow(static_cast<int>(ws->layerId));
+        ws->xdgToplevel = nullptr;
+    }
+    xdgSurface->toplevel = nullptr;
 }
 
 void WaylandXdgShell::toplevelSetParent(struct wl_client* /*client*/,
