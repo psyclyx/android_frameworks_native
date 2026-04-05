@@ -1,0 +1,16 @@
+android_app {
+    name: "WaylandHost",
+    srcs: [
+        "src/main/java/**/*.java",
+        "src/main/aidl/**/*.aidl",
+    ],
+    resource_dirs: ["src/main/res"],
+    manifest: "src/main/AndroidManifest.xml",
+    aidl: {
+        local_include_dirs: ["src/main/aidl"],
+    },
+    platform_apis: true,
+    certificate: "platform",
+    privileged: true,
+    system_ext_specific: true,
+}

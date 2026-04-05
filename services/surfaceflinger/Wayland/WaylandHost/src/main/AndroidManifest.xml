@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.lineageos.wayland"
+    android:sharedUserId="android.uid.system">
+
+    <application
+        android:label="Wayland Host"
+        android:persistent="true"
+        android:directBootAware="true">
+
+        <service
+            android:name=".WaylandWindowService"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="org.lineageos.wayland.WINDOW_MANAGER" />
+            </intent-filter>
+        </service>
+
+        <!-- Linux Apps launcher — visible in any Android launcher -->
+        <activity
+            android:name=".WaylandAppLauncherActivity"
+            android:exported="true"
+            android:label="Linux Apps"
+            android:theme="@android:style/Theme.DeviceDefault">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- Settings -->
+        <activity
+            android:name=".WaylandSettingsActivity"
+            android:exported="true"
+            android:label="Wayland Settings"
+            android:theme="@android:style/Theme.DeviceDefault" />
+
+        <!-- Per-window Activity for Wayland toplevel surfaces -->
+        <activity
+            android:name=".WaylandWindowActivity"
+            android:exported="false"
+            android:theme="@style/WaylandWindowTheme"
+            android:taskAffinity=""
+            android:resizeableActivity="true"
+            android:documentLaunchMode="always"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|density" />
+
+        <!-- Start the service at boot -->
+        <receiver
+            android:name=".BootReceiver"
+            android:exported="true"
+            android:directBootAware="true">
+            <intent-filter>
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+    </application>
+</manifest>
