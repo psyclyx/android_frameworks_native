@@ -193,6 +193,40 @@ public class WaylandWindowService extends Service {
                 }
             }
         }
+
+        @Override
+        public void showTextInput(int layerId, int contentHint, int contentPurpose,
+                                   int cursorX, int cursorY, int cursorW, int cursorH) {
+            WaylandWindowActivity activity = findActivityForLayer(layerId);
+            if (activity != null) {
+                activity.showTextInput(contentHint, contentPurpose,
+                        cursorX, cursorY, cursorW, cursorH);
+            }
+        }
+
+        @Override
+        public void hideTextInput(int layerId) {
+            WaylandWindowActivity activity = findActivityForLayer(layerId);
+            if (activity != null) {
+                activity.hideTextInput();
+            }
+        }
+
+        @Override
+        public void updateSurroundingText(int layerId, String text, int cursor, int anchor) {
+            WaylandWindowActivity activity = findActivityForLayer(layerId);
+            if (activity != null) {
+                activity.updateSurroundingText(text, cursor, anchor);
+            }
+        }
+
+        @Override
+        public void updateCursorRectangle(int layerId, int x, int y, int w, int h) {
+            WaylandWindowActivity activity = findActivityForLayer(layerId);
+            if (activity != null) {
+                activity.updateCursorRectangle(x, y, w, h);
+            }
+        }
     };
 
     @Override
@@ -271,6 +305,16 @@ public class WaylandWindowService extends Service {
         synchronized (mDialogHosts) {
             return mDialogHosts.get(dialogLayerId);
         }
+    }
+
+    private WaylandWindowActivity findActivityForLayer(int layerId) {
+        WaylandWindowActivity activity;
+        synchronized (mWindows) {
+            activity = mWindows.get(layerId);
+        }
+        if (activity != null) return activity;
+        // Might be a dialog — find its host Activity.
+        return findDialogHost(layerId);
     }
 
     void onWindowDestroyed(int layerId) {

@@ -71,6 +71,7 @@ private:
 
     void sendKeymapToKeyboard(struct wl_resource* keyboard);
 
+    WaylandCompositor* mCompositor;
     uint32_t mSerial = 0;
 
     // Keymap data (created once at init, fd kept open)

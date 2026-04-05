@@ -37,6 +37,7 @@
 #include "WaylandSeat.h"
 #include "WaylandShm.h"
 #include "WaylandSurface.h"
+#include "WaylandTextInput.h"
 #include "WaylandXdgShell.h"
 
 namespace android {
@@ -54,6 +55,7 @@ public:
 
     SurfaceFlinger& flinger() { return mFlinger; }
     WaylandSeat* seat() { return mSeat.get(); }
+    WaylandTextInput* textInput() { return mTextInput; }
     struct wl_display* display() { return mDisplay; }
     int32_t outputScale() const { return mOutputScale; }
     void removeSurface(struct wl_resource* resource);
@@ -116,6 +118,23 @@ public:
     void dispatchKey(int layerId, uint32_t timeMs, uint32_t evdevKey, bool pressed);
     void dispatchPopupDismiss(int layerId);
 
+    // Text input support — request Android IME actions.
+    void requestShowTextInput(int layerId, uint32_t contentHint, uint32_t contentPurpose,
+                               int32_t cursorX, int32_t cursorY,
+                               int32_t cursorW, int32_t cursorH);
+    void requestHideTextInput(int layerId);
+    void requestUpdateSurroundingText(int layerId, const char* text,
+                                       int32_t cursor, int32_t anchor);
+    void requestUpdateCursorRectangle(int layerId, int32_t x, int32_t y,
+                                       int32_t w, int32_t h);
+
+    // Text input dispatch — called from binder thread.
+    void dispatchCommitString(int layerId, const char* text);
+    void dispatchPreeditString(int layerId, const char* text,
+                                int32_t cursorBegin, int32_t cursorEnd);
+    void dispatchDeleteSurroundingText(int layerId, uint32_t beforeLength,
+                                        uint32_t afterLength);
+
 private:
     explicit WaylandCompositor(SurfaceFlinger& flinger);
 
@@ -143,6 +162,7 @@ private:
     int32_t mOutputScale = 1; // wl_output scale factor
 
     std::unique_ptr<WaylandSeat> mSeat;
+    WaylandTextInput* mTextInput = nullptr; // owned by wl_global destructor
 
     // Keyed by wl_resource* of the wl_surface
     std::unordered_map<struct wl_resource*, std::unique_ptr<WaylandSurface>> mSurfaces;
@@ -161,12 +181,14 @@ private:
     // Pending configure events (queued from binder thread, dispatched on Wayland thread).
     // Pending events queued from other threads, dispatched on Wayland thread.
     struct PendingEvent {
-        enum Type { Configure, PointerMotion, PointerButton, Key, PopupDismiss };
+        enum Type { Configure, PointerMotion, PointerButton, Key, PopupDismiss,
+                    TextCommitString, TextPreeditString, TextDeleteSurrounding };
         Type type;
         int layerId;
         int32_t i1, i2, i3; // generic int args
         float f1, f2;       // generic float args
         bool b1;
+        std::string text;   // for text input events
     };
     std::vector<PendingEvent> mPendingEvents GUARDED_BY(mCallbacksMutex);
 
@@ -204,6 +226,10 @@ private:
     std::mutex mReleaseMutex;
     std::unordered_map<uint64_t, PendingRelease> mPendingDmabufReleases GUARDED_BY(mReleaseMutex);
 
+    // Buffers released by SF without a fence — held until a fenced release proves
+    // the display pipeline has advanced and they're safe to return to the client.
+    std::vector<PendingRelease> mDeferredReleases GUARDED_BY(mReleaseMutex);
+
     // Called by ReleaseListener on binder thread.
     void onBufferReleased(uint64_t bufferId, uint64_t frameNumber, sp<Fence> releaseFence);
 
@@ -226,6 +252,7 @@ public:
         int dmabufFd = -1; // dup'd dmabuf fd for sync (buffer thread will close)
         sp<Fence> acquireFence; // GPU fence extracted at commit time
         struct wl_resource* wlBuffer = nullptr; // for fence-based release tracking
+        bool skipSwizzle = false; // dmabuf CPU-copy: byte order already matches, no R↔B swap
     };
     void postBufferWork(BufferWork&& work);
 

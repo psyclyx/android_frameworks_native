@@ -19,6 +19,7 @@
 
 #include "WaylandSeat.h"
 #include "WaylandCompositor.h"
+#include "WaylandTextInput.h"
 
 #include <algorithm>
 #include <errno.h>
@@ -70,7 +71,7 @@ const struct ::wl_keyboard_interface WaylandSeat::kKeyboardImpl = {
         .release = WaylandSeat::keyboardRelease,
 };
 
-WaylandSeat::WaylandSeat(WaylandCompositor* /*compositor*/) {
+WaylandSeat::WaylandSeat(WaylandCompositor* compositor) : mCompositor(compositor) {
     // Load the xkb keymap and create a sealed memfd for sharing with clients.
     // Try system path first, then fall back to the path next to surfaceflinger.
     std::string keymap;
@@ -301,6 +302,11 @@ void WaylandSeat::setFocus(struct wl_resource* surface) {
     }
 
     mFocusedSurface = surface;
+
+    // Update text input focus.
+    if (mCompositor && mCompositor->textInput()) {
+        mCompositor->textInput()->setFocus(surface);
+    }
 
     // Send pointer enter + keyboard enter to new surface
     if (mFocusedSurface) {

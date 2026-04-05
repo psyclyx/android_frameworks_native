@@ -16,4 +16,10 @@ interface IWaylandWindowCallback {
     void onPointerMotion(int layerId, long timeMs, float x, float y);
     void onPointerButton(int layerId, long timeMs, int button, boolean pressed);
     void onKey(int layerId, long timeMs, int evdevKey, boolean pressed);
+
+    // Text input events — IME composed text forwarded to compositor.
+    void onCommitString(int layerId, String text);
+    void onPreeditString(int layerId, String text, int cursorBegin, int cursorEnd);
+    void onDeleteSurroundingText(int layerId, int beforeLength, int afterLength);
+    void onFinishComposingText(int layerId);
 }

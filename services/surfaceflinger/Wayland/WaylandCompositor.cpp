@@ -20,13 +20,14 @@
 // Uncomment to apply colored stripe overlays on CPU-copied buffers.
 // Red horizontal stripes = SHM path (BGRA→RGBA swizzle copy).
 // Each stripe is 8px tall, 50% opacity blend.
-#define WAYLAND_DEBUG_CPU_COPY_TINT 1
+#define WAYLAND_DEBUG_CPU_COPY_TINT 0
 
 #include "WaylandCompositor.h"
 
 #include <algorithm>
 #include <cstdarg>
 #include <errno.h>
+#include <inttypes.h>
 #include <linux/dma-buf.h>
 #include <poll.h>
 #include <sys/eventfd.h>
@@ -50,6 +51,7 @@
 #include "WaylandDecoration.h"
 #include "WaylandLayerShell.h"
 #include "WaylandSubcompositor.h"
+#include "WaylandTextInput.h"
 
 #include "FrontEnd/LayerCreationArgs.h"
 #include "FrontEnd/LayerHandle.h"
@@ -274,6 +276,17 @@ bool WaylandCompositor::init(const sp<Looper>& /*looper*/) {
         return false;
     }
 
+    // Register zwp_text_input_manager_v3 global.
+    {
+        auto* ti = new WaylandTextInput(this);
+        if (!ti->createGlobal(mDisplay)) {
+            ALOGE("Failed to create zwp_text_input_manager_v3 global");
+            delete ti;
+            return false;
+        }
+        mTextInput = ti;
+    }
+
     mEventLoop = wl_display_get_event_loop(mDisplay);
     mEventLoopFd = wl_event_loop_get_fd(mEventLoop);
 
@@ -457,6 +470,10 @@ enum {
     TRANSACTION_sendPointerButton = ::android::IBinder::FIRST_CALL_TRANSACTION + 4,
     TRANSACTION_sendKey = ::android::IBinder::FIRST_CALL_TRANSACTION + 5,
     TRANSACTION_setExclusiveZones = ::android::IBinder::FIRST_CALL_TRANSACTION + 6,
+    TRANSACTION_showTextInput = ::android::IBinder::FIRST_CALL_TRANSACTION + 7,
+    TRANSACTION_hideTextInput = ::android::IBinder::FIRST_CALL_TRANSACTION + 8,
+    TRANSACTION_updateSurroundingText = ::android::IBinder::FIRST_CALL_TRANSACTION + 9,
+    TRANSACTION_updateCursorRectangle = ::android::IBinder::FIRST_CALL_TRANSACTION + 10,
 };
 
 enum {
@@ -466,6 +483,10 @@ enum {
     CB_TRANSACTION_onPointerMotion = ::android::IBinder::FIRST_CALL_TRANSACTION + 3,
     CB_TRANSACTION_onPointerButton = ::android::IBinder::FIRST_CALL_TRANSACTION + 4,
     CB_TRANSACTION_onKey = ::android::IBinder::FIRST_CALL_TRANSACTION + 5,
+    CB_TRANSACTION_onCommitString = ::android::IBinder::FIRST_CALL_TRANSACTION + 6,
+    CB_TRANSACTION_onPreeditString = ::android::IBinder::FIRST_CALL_TRANSACTION + 7,
+    CB_TRANSACTION_onDeleteSurroundingText = ::android::IBinder::FIRST_CALL_TRANSACTION + 8,
+    CB_TRANSACTION_onFinishComposingText = ::android::IBinder::FIRST_CALL_TRANSACTION + 9,
 };
 
 // Native binder callback that receives the Activity's window handle
@@ -558,6 +579,58 @@ public:
                     mCompositor->dispatchKey(layerId,
                             static_cast<uint32_t>(timeMs),
                             static_cast<uint32_t>(evdevKey), pressed);
+                }
+                if (reply) reply->writeNoException();
+                return NO_ERROR;
+            }
+            case CB_TRANSACTION_onCommitString: {
+                data.enforceInterface(
+                        String16("org.lineageos.wayland.IWaylandWindowCallback"));
+                int32_t layerId = data.readInt32();
+                String16 text16 = data.readString16();
+                String8 text8(text16);
+                if (mCompositor) {
+                    mCompositor->dispatchCommitString(layerId, text8.c_str());
+                }
+                if (reply) reply->writeNoException();
+                return NO_ERROR;
+            }
+            case CB_TRANSACTION_onPreeditString: {
+                data.enforceInterface(
+                        String16("org.lineageos.wayland.IWaylandWindowCallback"));
+                int32_t layerId = data.readInt32();
+                String16 text16 = data.readString16();
+                String8 text8(text16);
+                int32_t cursorBegin = data.readInt32();
+                int32_t cursorEnd = data.readInt32();
+                if (mCompositor) {
+                    mCompositor->dispatchPreeditString(layerId, text8.c_str(),
+                            cursorBegin, cursorEnd);
+                }
+                if (reply) reply->writeNoException();
+                return NO_ERROR;
+            }
+            case CB_TRANSACTION_onDeleteSurroundingText: {
+                data.enforceInterface(
+                        String16("org.lineageos.wayland.IWaylandWindowCallback"));
+                int32_t layerId = data.readInt32();
+                int32_t beforeLength = data.readInt32();
+                int32_t afterLength = data.readInt32();
+                if (mCompositor) {
+                    mCompositor->dispatchDeleteSurroundingText(layerId,
+                            static_cast<uint32_t>(beforeLength),
+                            static_cast<uint32_t>(afterLength));
+                }
+                if (reply) reply->writeNoException();
+                return NO_ERROR;
+            }
+            case CB_TRANSACTION_onFinishComposingText: {
+                data.enforceInterface(
+                        String16("org.lineageos.wayland.IWaylandWindowCallback"));
+                int32_t layerId = data.readInt32();
+                if (mCompositor) {
+                    // Clear preedit and send done.
+                    mCompositor->dispatchPreeditString(layerId, nullptr, 0, 0);
                 }
                 if (reply) reply->writeNoException();
                 return NO_ERROR;
@@ -772,7 +845,116 @@ void WaylandCompositor::dismissPopupsForClient(struct wl_client* client) {
 void WaylandCompositor::dispatchPopupDismiss(int layerId) {
     {
         std::lock_guard<std::mutex> lock(mCallbacksMutex);
-        mPendingEvents.push_back({PendingEvent::PopupDismiss, layerId, 0, 0, 0, 0, 0, false});
+        mPendingEvents.push_back({PendingEvent::PopupDismiss, layerId, 0, 0, 0, 0, 0, false, {}});
+    }
+    if (mWakeEventFd >= 0) { uint64_t v=1; write(mWakeEventFd, &v, sizeof(v)); }
+}
+
+// --- Text input AIDL requests ---
+
+void WaylandCompositor::requestShowTextInput(int layerId, uint32_t contentHint,
+                                              uint32_t contentPurpose,
+                                              int32_t cursorX, int32_t cursorY,
+                                              int32_t cursorW, int32_t cursorH) {
+    sp<IBinder> service = defaultServiceManager()->checkService(
+            String16("wayland_window_manager"));
+    if (!service) return;
+
+    Parcel data, reply;
+    data.writeInterfaceToken(String16("org.lineageos.wayland.IWaylandWindowManager"));
+    data.writeInt32(layerId);
+    data.writeInt32(static_cast<int32_t>(contentHint));
+    data.writeInt32(static_cast<int32_t>(contentPurpose));
+    data.writeInt32(cursorX);
+    data.writeInt32(cursorY);
+    data.writeInt32(cursorW);
+    data.writeInt32(cursorH);
+    service->transact(TRANSACTION_showTextInput, data, &reply);
+    ALOGI("requestShowTextInput: layerId=%d hint=0x%x purpose=%u", layerId, contentHint, contentPurpose);
+}
+
+void WaylandCompositor::requestHideTextInput(int layerId) {
+    sp<IBinder> service = defaultServiceManager()->checkService(
+            String16("wayland_window_manager"));
+    if (!service) return;
+
+    Parcel data, reply;
+    data.writeInterfaceToken(String16("org.lineageos.wayland.IWaylandWindowManager"));
+    data.writeInt32(layerId);
+    service->transact(TRANSACTION_hideTextInput, data, &reply);
+    ALOGI("requestHideTextInput: layerId=%d", layerId);
+}
+
+void WaylandCompositor::requestUpdateSurroundingText(int layerId, const char* text,
+                                                       int32_t cursor, int32_t anchor) {
+    sp<IBinder> service = defaultServiceManager()->checkService(
+            String16("wayland_window_manager"));
+    if (!service) return;
+
+    Parcel data, reply;
+    data.writeInterfaceToken(String16("org.lineageos.wayland.IWaylandWindowManager"));
+    data.writeInt32(layerId);
+    data.writeString16(text ? String16(text) : String16());
+    data.writeInt32(cursor);
+    data.writeInt32(anchor);
+    service->transact(TRANSACTION_updateSurroundingText, data, &reply);
+}
+
+void WaylandCompositor::requestUpdateCursorRectangle(int layerId, int32_t x, int32_t y,
+                                                       int32_t w, int32_t h) {
+    sp<IBinder> service = defaultServiceManager()->checkService(
+            String16("wayland_window_manager"));
+    if (!service) return;
+
+    Parcel data, reply;
+    data.writeInterfaceToken(String16("org.lineageos.wayland.IWaylandWindowManager"));
+    data.writeInt32(layerId);
+    data.writeInt32(x);
+    data.writeInt32(y);
+    data.writeInt32(w);
+    data.writeInt32(h);
+    service->transact(TRANSACTION_updateCursorRectangle, data, &reply);
+}
+
+// --- Text input dispatch (binder thread → Wayland thread) ---
+
+void WaylandCompositor::dispatchCommitString(int layerId, const char* text) {
+    {
+        std::lock_guard<std::mutex> lock(mCallbacksMutex);
+        PendingEvent ev;
+        ev.type = PendingEvent::TextCommitString;
+        ev.layerId = layerId;
+        ev.text = text ? text : "";
+        mPendingEvents.push_back(std::move(ev));
+    }
+    if (mWakeEventFd >= 0) { uint64_t v=1; write(mWakeEventFd, &v, sizeof(v)); }
+}
+
+void WaylandCompositor::dispatchPreeditString(int layerId, const char* text,
+                                                int32_t cursorBegin, int32_t cursorEnd) {
+    {
+        std::lock_guard<std::mutex> lock(mCallbacksMutex);
+        PendingEvent ev;
+        ev.type = PendingEvent::TextPreeditString;
+        ev.layerId = layerId;
+        ev.i1 = cursorBegin;
+        ev.i2 = cursorEnd;
+        ev.text = text ? text : "";
+        mPendingEvents.push_back(std::move(ev));
+    }
+    if (mWakeEventFd >= 0) { uint64_t v=1; write(mWakeEventFd, &v, sizeof(v)); }
+}
+
+void WaylandCompositor::dispatchDeleteSurroundingText(int layerId, uint32_t beforeLength,
+                                                        uint32_t afterLength) {
+    {
+        std::lock_guard<std::mutex> lock(mCallbacksMutex);
+        PendingEvent ev;
+        ev.type = PendingEvent::TextDeleteSurrounding;
+        ev.layerId = layerId;
+        ev.i1 = static_cast<int32_t>(beforeLength);
+        ev.i2 = static_cast<int32_t>(afterLength);
+        mPendingEvents.push_back(std::move(ev));
     }
     if (mWakeEventFd >= 0) { uint64_t v=1; write(mWakeEventFd, &v, sizeof(v)); }
 }
@@ -807,6 +989,7 @@ void WaylandCompositor::fireFrameCallbacks(uint32_t vsyncTimeMs) {
 }
 
 void WaylandCompositor::queueBufferRelease(struct wl_resource* buffer) {
+    ALOGI("[BUF] queueBufferRelease: buffer=%p", buffer);
     std::lock_guard<std::mutex> lock(mCallbacksMutex);
     mPendingBufferReleases.push_back(buffer);
 }
@@ -844,7 +1027,12 @@ void WaylandCompositor::doFireFrameCallbacksAndReleases() {
         vsyncMs = mPendingVsyncTimeMs;
     }
 
+    if (!releasable.empty() || !callbacks.empty()) {
+        ALOGI("[BUF] doFire: releasing %zu buffers, firing %zu frame callbacks, vsync=%u",
+              releasable.size(), callbacks.size(), vsyncMs);
+    }
     for (auto* buf : releasable) {
+        ALOGI("[BUF] doFire: wl_buffer_send_release buf=%p", buf);
         wl_buffer_send_release(buf);
     }
     for (auto* cb : callbacks) {
@@ -920,6 +1108,31 @@ void WaylandCompositor::doFireFrameCallbacksAndReleases() {
                 }
                 break;
             }
+            case PendingEvent::TextCommitString: {
+                if (mTextInput) {
+                    mTextInput->sendCommitString(ev.text.c_str());
+                    mTextInput->sendDone();
+                }
+                break;
+            }
+            case PendingEvent::TextPreeditString: {
+                if (mTextInput) {
+                    mTextInput->sendPreeditString(
+                            ev.text.empty() ? nullptr : ev.text.c_str(),
+                            ev.i1, ev.i2);
+                    mTextInput->sendDone();
+                }
+                break;
+            }
+            case PendingEvent::TextDeleteSurrounding: {
+                if (mTextInput) {
+                    mTextInput->sendDeleteSurroundingText(
+                            static_cast<uint32_t>(ev.i1),
+                            static_cast<uint32_t>(ev.i2));
+                    mTextInput->sendDone();
+                }
+                break;
+            }
         }
     }
 }
@@ -960,10 +1173,10 @@ void WaylandCompositor::notifyBufferDestroyed(struct wl_resource* buffer) {
 // --- HWC release fence handling ---
 
 void WaylandCompositor::ReleaseListener::onTransactionCompleted(ListenerStats stats) {
-    ALOGI("onTransactionCompleted: %zu transactions", stats.transactionStats.size());
+    ALOGI("[BUF] onTransactionCompleted: %zu transactions", stats.transactionStats.size());
     for (const auto& transactionStats : stats.transactionStats) {
         for (const auto& surfaceStats : transactionStats.surfaceStats) {
-            ALOGI("  surfaceStats: prevReleaseId=%" PRIu64 "/%" PRIu64 " fence=%s",
+            ALOGI("[BUF]   surfaceStats: prevReleaseId=%" PRIu64 "/%" PRIu64 " fence=%s",
                   surfaceStats.previousReleaseCallbackId.bufferId,
                   surfaceStats.previousReleaseCallbackId.framenumber,
                   surfaceStats.previousReleaseFence ? "yes" : "no");
@@ -980,7 +1193,7 @@ void WaylandCompositor::ReleaseListener::onTransactionCompleted(ListenerStats st
 void WaylandCompositor::ReleaseListener::onReleaseBuffer(
         ReleaseCallbackId callbackId, sp<Fence> releaseFence,
         uint32_t /*currentMaxAcquiredBufferCount*/, bool /*removeFromCache*/) {
-    ALOGE("WaylandRelease: onReleaseBuffer bufferId=%" PRIu64 " frame=%" PRIu64 " fence=%s",
+    ALOGI("[BUF] onReleaseBuffer: bufferId=%" PRIu64 " frame=%" PRIu64 " fence=%s",
           callbackId.bufferId, callbackId.framenumber,
           releaseFence && releaseFence->isValid() ? "valid" : "none");
     mCompositor.onBufferReleased(callbackId.bufferId, callbackId.framenumber,
@@ -993,13 +1206,18 @@ void WaylandCompositor::onBufferReleased(uint64_t bufferId, uint64_t /*frameNumb
     {
         std::lock_guard<std::mutex> lock(mReleaseMutex);
         auto it = mPendingDmabufReleases.find(bufferId);
-        if (it == mPendingDmabufReleases.end()) return;
+        if (it == mPendingDmabufReleases.end()) {
+            ALOGE("[BUF] onBufferReleased: bufferId=%" PRIu64 " NOT FOUND in pending releases (size=%zu)",
+                  bufferId, mPendingDmabufReleases.size());
+            return;
+        }
         pr = it->second;
         mPendingDmabufReleases.erase(it);
     }
 
     // Import HWC's release fence into the dma-buf so the client's next GPU
     // submission on this buffer waits until the display is done scanning.
+    bool fenceImported = false;
     if (pr.dmabufFd >= 0 && releaseFence && releaseFence->isValid()) {
         int fenceFd = releaseFence->dup();
         if (fenceFd >= 0) {
@@ -1007,11 +1225,28 @@ void WaylandCompositor::onBufferReleased(uint64_t bufferId, uint64_t /*frameNumb
             importSync.flags = DMA_BUF_SYNC_WRITE; // client will write next
             importSync.fd = fenceFd;
             if (ioctl(pr.dmabufFd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &importSync) != 0) {
-                ALOGW("onBufferReleased: DMA_BUF_IOCTL_IMPORT_SYNC_FILE failed: %s",
-                      strerror(errno));
+                ALOGE("onBufferReleased: IMPORT_SYNC_FILE FAILED fd=%d: %s (errno=%d)",
+                      pr.dmabufFd, strerror(errno), errno);
             } else {
-                ALOGD("onBufferReleased: imported HWC release fence into dmabuf");
+                fenceImported = true;
             }
+            close(fenceFd);
+        }
+    }
+    ALOGI("[BUF] onBufferReleased: bufferId=%" PRIu64 " dmabufFd=%d releaseFence=%s imported=%s",
+          bufferId, pr.dmabufFd,
+          (releaseFence && releaseFence->isValid()) ? "VALID" : "NONE",
+          fenceImported ? "YES" : "NO");
+
+    // Import HWC's release fence into the dma-buf so the client's next GPU
+    // submission on this buffer waits until the display is done scanning.
+    if (pr.dmabufFd >= 0 && releaseFence && releaseFence->isValid()) {
+        int fenceFd = releaseFence->dup();
+        if (fenceFd >= 0) {
+            struct dma_buf_import_sync_file importSync = {};
+            importSync.flags = DMA_BUF_SYNC_WRITE;
+            importSync.fd = fenceFd;
+            ioctl(pr.dmabufFd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &importSync);
             close(fenceFd);
         }
     }
@@ -1035,6 +1270,9 @@ void WaylandCompositor::onBufferReleased(uint64_t bufferId, uint64_t /*frameNumb
 }
 
 void WaylandCompositor::postBufferWork(BufferWork&& work) {
+    ALOGI("[BUF] postBufferWork: layer=%u frame=%" PRIu64 " %dx%d hasPix=%d hasGb=%d dmabufFd=%d",
+          work.layerId, work.frameNumber, work.width, work.height,
+          !work.pixels.empty(), work.gb != nullptr, work.dmabufFd);
     {
         std::lock_guard<std::mutex> lock(mBufferMutex);
         mBufferQueue.push_back(std::move(work));
@@ -1055,56 +1293,85 @@ void WaylandCompositor::bufferThreadLoop() {
         }
 
         for (auto& item : work) {
+            ALOGI("[BUF] bufferThread: processing layer=%u frame=%" PRIu64 " %dx%d hasPix=%d hasGb=%d",
+                  item.layerId, item.frameNumber, item.width, item.height,
+                  !item.pixels.empty(), item.gb != nullptr);
+
             sp<GraphicBuffer> gb = item.gb;
             const uint32_t w = static_cast<uint32_t>(item.width);
             const uint32_t h = static_cast<uint32_t>(item.height);
 
-            // --- SHM path: BGRA→RGBA swizzle copy ---
+            // --- Pixel copy path (SHM swizzle or dmabuf straight copy) ---
             if (!item.pixels.empty() && !gb) {
+                ALOGI("[BUF] bufferThread: pixel copy alloc %ux%u fmt=%d skipSwizzle=%d layer=%u",
+                      w, h, item.pixFmt, item.skipSwizzle, item.layerId);
                 gb = sp<GraphicBuffer>::make(w, h, item.pixFmt, 1u,
                         static_cast<uint64_t>(GRALLOC_USAGE_SW_WRITE_OFTEN |
                                               GRALLOC_USAGE_HW_TEXTURE |
                                               GRALLOC_USAGE_HW_COMPOSER),
                         "WaylandShm");
                 if (gb->initCheck() != NO_ERROR) {
-                    ALOGE("BufferThread: GraphicBuffer alloc failed");
+                    ALOGE("[BUF] bufferThread: GraphicBuffer alloc FAILED layer=%u", item.layerId);
                     continue;
                 }
+                ALOGI("[BUF] bufferThread: alloc OK gb=%p id=%" PRIu64 " stride=%u layer=%u",
+                      gb.get(), gb->getId(), gb->getStride(), item.layerId);
                 void* dst = nullptr;
-                if (gb->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, &dst) != NO_ERROR || !dst) {
-                    ALOGE("BufferThread: GraphicBuffer lock failed");
+                status_t lockErr = gb->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, &dst);
+                if (lockErr != NO_ERROR || !dst) {
+                    ALOGE("[BUF] bufferThread: GraphicBuffer lock FAILED err=%d dst=%p layer=%u",
+                          lockErr, dst, item.layerId);
                     continue;
                 }
                 const uint32_t bpp = bytesPerPixel(item.pixFmt);
                 const uint8_t* src = item.pixels.data();
                 uint8_t* dstBytes = static_cast<uint8_t*>(dst);
                 const uint32_t dstStride = gb->getStride() * bpp;
-                for (uint32_t y = 0; y < h; y++) {
-                    const uint32_t* srcRow =
-                            reinterpret_cast<const uint32_t*>(src + y * item.srcStride);
-                    uint32_t* dstRow =
-                            reinterpret_cast<uint32_t*>(dstBytes + y * dstStride);
-                    for (uint32_t x = 0; x < w; x++) {
-                        uint32_t px = srcRow[x];
-                        uint32_t b = (px >> 0) & 0xFF;
-                        uint32_t g = (px >> 8) & 0xFF;
-                        uint32_t r = (px >> 16) & 0xFF;
-                        uint32_t a = (px >> 24) & 0xFF;
-#if WAYLAND_DEBUG_CPU_COPY_TINT
-                        // Red horizontal stripes (8px period) = SHM swizzle path
-                        if ((y / 8) & 1) {
-                            r = (r + 255) / 2;
-                            g = g / 2;
-                            b = b / 2;
-                        }
-#endif
-                        dstRow[x] = (a << 24) | (b << 16) | (g << 8) | r;
+                ALOGI("[BUF] bufferThread: lock OK dst=%p srcStride=%u dstStride=%u layer=%u",
+                      dst, item.srcStride, dstStride, item.layerId);
+
+                if (item.skipSwizzle) {
+                    // Dmabuf CPU-copy: DRM format byte order already matches
+                    // Android pixel format, just copy row by row.
+                    for (uint32_t y = 0; y < h; y++) {
+                        memcpy(dstBytes + y * dstStride,
+                               src + y * item.srcStride,
+                               static_cast<size_t>(w) * bpp);
                     }
+                    ALOGI("[BUF] bufferThread: straight copy done %ux%u layer=%u", w, h, item.layerId);
+                } else {
+                    // SHM path: BGRA→RGBA swizzle (WL_SHM_FORMAT_ARGB8888 →
+                    // PIXEL_FORMAT_RGBA_8888).
+                    for (uint32_t y = 0; y < h; y++) {
+                        const uint32_t* srcRow =
+                                reinterpret_cast<const uint32_t*>(src + y * item.srcStride);
+                        uint32_t* dstRow =
+                                reinterpret_cast<uint32_t*>(dstBytes + y * dstStride);
+                        for (uint32_t x = 0; x < w; x++) {
+                            uint32_t px = srcRow[x];
+                            uint32_t b = (px >> 0) & 0xFF;
+                            uint32_t g = (px >> 8) & 0xFF;
+                            uint32_t r = (px >> 16) & 0xFF;
+                            uint32_t a = (px >> 24) & 0xFF;
+#if WAYLAND_DEBUG_CPU_COPY_TINT
+                            if ((y / 8) & 1) {
+                                r = (r + 255) / 2;
+                                g = g / 2;
+                                b = b / 2;
+                            }
+#endif
+                            dstRow[x] = (a << 24) | (b << 16) | (g << 8) | r;
+                        }
+                    }
+                    ALOGI("[BUF] bufferThread: swizzle copy done %ux%u layer=%u", w, h, item.layerId);
                 }
                 gb->unlock();
             }
 
-            if (!gb) continue;
+            if (!gb) {
+                ALOGE("[BUF] bufferThread: no GraphicBuffer after processing, skip layer=%u", item.layerId);
+                continue;
+            }
 
             // Use the GPU fence extracted at commit time (on the dispatch
             // thread) so it's captured before the GPU finishes.
@@ -1115,6 +1382,8 @@ void WaylandCompositor::bufferThreadLoop() {
             // so we can import the fence into the dma-buf before releasing
             // the buffer back to the client.
             bool hasDmabuf = item.dmabufFd >= 0 && item.wlBuffer;
+            ALOGI("[BUF] bufferThread: hasDmabuf=%d dmabufFd=%d wlBuffer=%p gbId=%" PRIu64 " layer=%u",
+                  hasDmabuf, item.dmabufFd, item.wlBuffer, gb->getId(), item.layerId);
             if (hasDmabuf) {
                 std::lock_guard<std::mutex> lock(mReleaseMutex);
                 PendingRelease pr;
@@ -1122,6 +1391,8 @@ void WaylandCompositor::bufferThreadLoop() {
                 pr.dmabufFd = item.dmabufFd;
                 item.dmabufFd = -1; // ownership transferred
                 mPendingDmabufReleases[gb->getId()] = pr;
+                ALOGI("[BUF] bufferThread: registered pending release gbId=%" PRIu64 " total=%zu layer=%u",
+                      gb->getId(), mPendingDmabufReleases.size(), item.layerId);
             }
             if (item.dmabufFd >= 0) {
                 close(item.dmabufFd);
@@ -1158,14 +1429,20 @@ void WaylandCompositor::bufferThreadLoop() {
                         IInterface::asBinder(mReleaseListener), cbIds);
             }
 
+            ALOGI("[BUF] bufferThread: setTransactionState layer=%u frame=%" PRIu64
+                  " %dx%d gbId=%" PRIu64 " fence=%s crop=%.0fx%.0f producerId=%u",
+                  item.layerId, item.frameNumber, item.width, item.height,
+                  gb->getId(),
+                  (acquireFence && acquireFence->isValid()) ? "valid" : "none",
+                  cs.state.crop.right, cs.state.crop.bottom, item.producerId);
+
             txn.mComposerStates.push_back(std::move(cs));
             txn.mId = (static_cast<uint64_t>(item.layerId) << 32) | item.frameNumber;
             txn.mIsAutoTimestamp = true;
 
             mFlinger.setTransactionState(std::move(txn), /*applyToken=*/nullptr);
-
-            ALOGD("BufferThread: submitting %dx%d buffer to layer %u frame %" PRIu64,
-                  item.width, item.height, item.layerId, item.frameNumber);
+            ALOGI("[BUF] bufferThread: submitted OK layer=%u frame=%" PRIu64,
+                  item.layerId, item.frameNumber);
         }
     }
 }

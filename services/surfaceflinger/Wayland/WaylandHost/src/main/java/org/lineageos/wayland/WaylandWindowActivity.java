@@ -22,6 +22,7 @@ import android.view.inputmethod.InputConnection;
 import android.view.inputmethod.InputMethodManager;
 import android.widget.FrameLayout;
 import android.widget.ImageButton;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Represents one Wayland xdg_toplevel as an Android Activity.
@@ -38,10 +39,16 @@ public class WaylandWindowActivity extends Activity {
     static final String EXTRA_WIDTH = "width";
     static final String EXTRA_HEIGHT = "height";
 
-    // Linux input event codes for mouse buttons (from linux/input-event-codes.h)
+    // Linux input event codes (from linux/input-event-codes.h)
     private static final int BTN_LEFT = 0x110;
     private static final int BTN_RIGHT = 0x111;
     private static final int BTN_MIDDLE = 0x112;
+    private static final int KEY_ENTER = 28;
+    private static final int KEY_LEFT = 105;
+    private static final int KEY_RIGHT = 106;
+    private static final int KEY_LEFTSHIFT = 42;
+    private static final int KEY_HOME = 102;
+    private static final int KEY_END = 107;
 
     private int mLayerId;
     private SurfaceView mSurfaceView;
@@ -50,6 +57,13 @@ public class WaylandWindowActivity extends Activity {
     private View mImeAnchor;
     private boolean mImeVisible;
     private int mLastReportedHeight = 0;
+
+    // Text input protocol state.
+    private boolean mTextInputActive = false;
+    private int mTextInputType = InputType.TYPE_NULL;
+    private String mSurroundingText = "";
+    private int mSurroundingCursorByte = 0;
+    private int mSurroundingAnchorByte = 0;
 
     // Dialog sub-windows hosted by this Activity
     private final SparseArray<DialogPanel> mDialogPanels = new SparseArray<>();
@@ -76,11 +90,18 @@ public class WaylandWindowActivity extends Activity {
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
 
-        // Hidden view to anchor the IME — TYPE_NULL makes the keyboard send
-        // raw KeyEvents instead of composing text, so onKeyDown/onKeyUp handle everything
+        // Hidden view to anchor the IME.
+        // When text input protocol is active, provides a rich InputConnection
+        // that forwards composed text to the compositor.
+        // When inactive, uses TYPE_NULL for raw key events.
         mImeAnchor = new View(this) {
             @Override
             public InputConnection onCreateInputConnection(EditorInfo outAttrs) {
+                if (mTextInputActive) {
+                    outAttrs.inputType = mTextInputType;
+                    outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN;
+                    return new WaylandInputConnection(this);
+                }
                 outAttrs.inputType = InputType.TYPE_NULL;
                 outAttrs.imeOptions = EditorInfo.IME_FLAG_NO_FULLSCREEN;
                 return new BaseInputConnection(this, false);
@@ -323,6 +344,264 @@ public class WaylandWindowActivity extends Activity {
             return true;
         }
         return super.onKeyUp(keyCode, event);
+    }
+
+    // --- Text input protocol methods (called from WaylandWindowService) ---
+
+    void showTextInput(int contentHint, int contentPurpose,
+                        int cursorX, int cursorY, int cursorW, int cursorH) {
+        runOnUiThread(() -> {
+            mTextInputActive = true;
+            mTextInputType = mapContentType(contentHint, contentPurpose);
+            Log.i(TAG, "showTextInput: hint=0x" + Integer.toHexString(contentHint)
+                    + " purpose=" + contentPurpose + " inputType=0x"
+                    + Integer.toHexString(mTextInputType));
+            InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                mImeAnchor.requestFocus();
+                imm.restartInput(mImeAnchor);
+                imm.showSoftInput(mImeAnchor, InputMethodManager.SHOW_FORCED);
+            }
+        });
+    }
+
+    void hideTextInput() {
+        runOnUiThread(() -> {
+            mTextInputActive = false;
+            InputMethodManager imm = (InputMethodManager) getSystemService(INPUT_METHOD_SERVICE);
+            if (imm != null) {
+                imm.hideSoftInputFromWindow(mImeAnchor.getWindowToken(), 0);
+            }
+        });
+    }
+
+    void updateSurroundingText(String text, int cursorByte, int anchorByte) {
+        runOnUiThread(() -> {
+            mSurroundingText = text != null ? text : "";
+            mSurroundingCursorByte = cursorByte;
+            mSurroundingAnchorByte = anchorByte;
+        });
+    }
+
+    void updateCursorRectangle(int x, int y, int w, int h) {
+        // Could be used for InputMethodManager.updateCursorAnchorInfo in the future.
+    }
+
+    private static int mapContentType(int hint, int purpose) {
+        int inputType;
+        switch (purpose) {
+            case 2: // digits
+                inputType = InputType.TYPE_CLASS_NUMBER;
+                break;
+            case 3: // number
+                inputType = InputType.TYPE_CLASS_NUMBER
+                        | InputType.TYPE_NUMBER_FLAG_DECIMAL
+                        | InputType.TYPE_NUMBER_FLAG_SIGNED;
+                break;
+            case 4: // phone
+                inputType = InputType.TYPE_CLASS_PHONE;
+                break;
+            case 5: // url
+                inputType = InputType.TYPE_CLASS_TEXT
+                        | InputType.TYPE_TEXT_VARIATION_URI;
+                break;
+            case 6: // email
+                inputType = InputType.TYPE_CLASS_TEXT
+                        | InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS;
+                break;
+            case 8: // password
+                inputType = InputType.TYPE_CLASS_TEXT
+                        | InputType.TYPE_TEXT_VARIATION_PASSWORD;
+                break;
+            case 9: // pin
+                inputType = InputType.TYPE_CLASS_NUMBER
+                        | InputType.TYPE_NUMBER_VARIATION_PASSWORD;
+                break;
+            case 13: // terminal
+                inputType = InputType.TYPE_CLASS_TEXT
+                        | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS;
+                break;
+            default:
+                inputType = InputType.TYPE_CLASS_TEXT;
+                break;
+        }
+        if ((hint & 0x1) != 0)
+            inputType |= InputType.TYPE_TEXT_FLAG_AUTO_COMPLETE;
+        if ((hint & 0x4) != 0)
+            inputType |= InputType.TYPE_TEXT_FLAG_CAP_SENTENCES;
+        if ((hint & 0x40) != 0)
+            inputType = InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_PASSWORD;
+        if ((hint & 0x200) != 0)
+            inputType |= InputType.TYPE_TEXT_FLAG_MULTI_LINE;
+        return inputType;
+    }
+
+    private static int utf8ByteToCharOffset(String text, int byteOffset) {
+        byte[] bytes = text.getBytes(StandardCharsets.UTF_8);
+        if (byteOffset <= 0) return 0;
+        if (byteOffset >= bytes.length) return text.length();
+        String prefix = new String(bytes, 0, byteOffset, StandardCharsets.UTF_8);
+        return prefix.length();
+    }
+
+    private static int charToUtf8ByteOffset(String text, int charOffset) {
+        if (charOffset <= 0) return 0;
+        if (charOffset >= text.length()) return text.getBytes(StandardCharsets.UTF_8).length;
+        String prefix = text.substring(0, charOffset);
+        return prefix.getBytes(StandardCharsets.UTF_8).length;
+    }
+
+    private class WaylandInputConnection extends BaseInputConnection {
+        WaylandInputConnection(View view) {
+            super(view, true);
+        }
+
+        @Override
+        public CharSequence getTextBeforeCursor(int n, int flags) {
+            int cursorChar = utf8ByteToCharOffset(mSurroundingText, mSurroundingCursorByte);
+            int start = Math.max(0, cursorChar - n);
+            return mSurroundingText.substring(start, cursorChar);
+        }
+
+        @Override
+        public CharSequence getTextAfterCursor(int n, int flags) {
+            int cursorChar = utf8ByteToCharOffset(mSurroundingText, mSurroundingCursorByte);
+            int end = Math.min(mSurroundingText.length(), cursorChar + n);
+            return mSurroundingText.substring(cursorChar, end);
+        }
+
+        @Override
+        public CharSequence getSelectedText(int flags) {
+            int cursorChar = utf8ByteToCharOffset(mSurroundingText, mSurroundingCursorByte);
+            int anchorChar = utf8ByteToCharOffset(mSurroundingText, mSurroundingAnchorByte);
+            int start = Math.min(cursorChar, anchorChar);
+            int end = Math.max(cursorChar, anchorChar);
+            if (start == end) return null;
+            return mSurroundingText.substring(start, end);
+        }
+
+        @Override
+        public boolean commitText(CharSequence text, int newCursorPosition) {
+            IWaylandWindowCallback callback = getCallback();
+            if (callback != null) {
+                try {
+                    callback.onCommitString(mLayerId, text.toString());
+                } catch (RemoteException e) {
+                    Log.w(TAG, "Failed to send commitText", e);
+                }
+            }
+            return true;
+        }
+
+        @Override
+        public boolean setComposingText(CharSequence text, int newCursorPosition) {
+            IWaylandWindowCallback callback = getCallback();
+            if (callback != null) {
+                try {
+                    String t = text.toString();
+                    int byteLen = t.getBytes(StandardCharsets.UTF_8).length;
+                    callback.onPreeditString(mLayerId, t, byteLen, byteLen);
+                } catch (RemoteException e) {
+                    Log.w(TAG, "Failed to send setComposingText", e);
+                }
+            }
+            return true;
+        }
+
+        @Override
+        public boolean finishComposingText() {
+            IWaylandWindowCallback callback = getCallback();
+            if (callback != null) {
+                try {
+                    callback.onFinishComposingText(mLayerId);
+                } catch (RemoteException e) {
+                    Log.w(TAG, "Failed to send finishComposingText", e);
+                }
+            }
+            return true;
+        }
+
+        @Override
+        public boolean deleteSurroundingText(int beforeLength, int afterLength) {
+            IWaylandWindowCallback callback = getCallback();
+            if (callback != null) {
+                try {
+                    int cursorChar = utf8ByteToCharOffset(mSurroundingText, mSurroundingCursorByte);
+                    int beforeStart = Math.max(0, cursorChar - beforeLength);
+                    int afterEnd = Math.min(mSurroundingText.length(), cursorChar + afterLength);
+                    int beforeBytes = charToUtf8ByteOffset(mSurroundingText, cursorChar)
+                            - charToUtf8ByteOffset(mSurroundingText, beforeStart);
+                    int afterBytes = charToUtf8ByteOffset(mSurroundingText, afterEnd)
+                            - charToUtf8ByteOffset(mSurroundingText, cursorChar);
+                    callback.onDeleteSurroundingText(mLayerId, beforeBytes, afterBytes);
+                } catch (RemoteException e) {
+                    Log.w(TAG, "Failed to send deleteSurroundingText", e);
+                }
+            }
+            return true;
+        }
+
+        @Override
+        public boolean setSelection(int start, int end) {
+            IWaylandWindowCallback callback = getCallback();
+            if (callback == null) return true;
+
+            int cursorChar = utf8ByteToCharOffset(mSurroundingText, mSurroundingCursorByte);
+
+            // Update local state immediately so subsequent getTextBeforeCursor/
+            // getTextAfterCursor calls from the IME see the new position before
+            // the Wayland round-trip completes.
+            mSurroundingCursorByte = charToUtf8ByteOffset(mSurroundingText, start);
+            mSurroundingAnchorByte = charToUtf8ByteOffset(mSurroundingText, end);
+
+            try {
+                long time = System.currentTimeMillis();
+                if (start == end) {
+                    // Simple cursor movement — synthesize arrow key presses.
+                    int delta = start - cursorChar;
+                    int key = delta > 0 ? KEY_RIGHT : KEY_LEFT;
+                    for (int i = 0; i < Math.abs(delta); i++) {
+                        callback.onKey(mLayerId, time, key, true);
+                        callback.onKey(mLayerId, time, key, false);
+                    }
+                } else {
+                    // Selection — move to start, then shift+arrow to end.
+                    int moveDelta = start - cursorChar;
+                    int moveKey = moveDelta > 0 ? KEY_RIGHT : KEY_LEFT;
+                    for (int i = 0; i < Math.abs(moveDelta); i++) {
+                        callback.onKey(mLayerId, time, moveKey, true);
+                        callback.onKey(mLayerId, time, moveKey, false);
+                    }
+                    // Hold shift and arrow to select.
+                    int selectDelta = end - start;
+                    int selectKey = selectDelta > 0 ? KEY_RIGHT : KEY_LEFT;
+                    callback.onKey(mLayerId, time, KEY_LEFTSHIFT, true);
+                    for (int i = 0; i < Math.abs(selectDelta); i++) {
+                        callback.onKey(mLayerId, time, selectKey, true);
+                        callback.onKey(mLayerId, time, selectKey, false);
+                    }
+                    callback.onKey(mLayerId, time, KEY_LEFTSHIFT, false);
+                }
+            } catch (RemoteException e) {
+                Log.w(TAG, "Failed to send setSelection", e);
+            }
+            return true;
+        }
+
+        @Override
+        public boolean performEditorAction(int editorAction) {
+            IWaylandWindowCallback callback = getCallback();
+            if (callback != null) {
+                try {
+                    long time = System.currentTimeMillis();
+                    callback.onKey(mLayerId, time, KEY_ENTER, true);
+                    callback.onKey(mLayerId, time, KEY_ENTER, false);
+                } catch (RemoteException e) {
+                    Log.w(TAG, "Failed to send performEditorAction", e);
+                }
+            }
+            return true;
+        }
     }
 
     void updateTitle(String title) {

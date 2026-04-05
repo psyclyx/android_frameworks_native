@@ -293,6 +293,8 @@ filegroup {
         "Wayland/WaylandShm.cpp",
         "Wayland/WaylandSubcompositor.cpp",
         "Wayland/WaylandSurface.cpp",
+        "Wayland/WaylandTextInput.cpp",
+        "Wayland/text-input-unstable-v3-protocol.c",
         "Wayland/WaylandXdgShell.cpp",
         "WindowInfosListenerInvoker.cpp",
     ],

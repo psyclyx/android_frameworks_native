@@ -24,4 +24,11 @@ interface IWaylandWindowManager {
 
     // Set display overscan to account for layer-shell exclusive zones.
     void setExclusiveZones(int top, int right, int bottom, int left);
+
+    // Text input support — called by compositor to control Android IME.
+    void showTextInput(int layerId, int contentHint, int contentPurpose,
+                       int cursorX, int cursorY, int cursorW, int cursorH);
+    void hideTextInput(int layerId);
+    void updateSurroundingText(int layerId, String text, int cursor, int anchor);
+    void updateCursorRectangle(int layerId, int x, int y, int w, int h);
 }
