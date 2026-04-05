@@ -193,8 +193,10 @@ public class WaylandAppLauncherActivity extends Activity {
                         ProcessEntry proc = mProcs.get(position);
                         TextView text1 = view.findViewById(android.R.id.text1);
                         TextView text2 = view.findViewById(android.R.id.text2);
-                        text1.setText(proc.name);
-                        text2.setText("PID " + proc.pid + "  " + proc.cmdline);
+                        String indent = "";
+                        for (int i = 0; i < proc.depth; i++) indent += "    ";
+                        text1.setText(indent + proc.name);
+                        text2.setText(indent + "PID " + proc.pid + "  " + proc.cmdline);
                         return view;
                     }
                 });
@@ -204,45 +206,87 @@ public class WaylandAppLauncherActivity extends Activity {
     }
 
     private List<ProcessEntry> scanProcesses() {
-        List<ProcessEntry> procs = new ArrayList<>();
         String chrootPath = WaylandConfig.getChrootPath(this);
 
-        // Find all processes whose root is the chroot
+        // Single su call: readlink is a fast syscall, only read details for matches
         String output = suExec(
-            "for p in /proc/[0-9]*/root; do "
-            + "pid=$(echo $p | cut -d/ -f3); "
-            + "root=$(readlink $p 2>/dev/null); "
-            + "[ \"$root\" = \"" + chrootPath + "\" ] && "
-            + "echo \"$pid $(cat /proc/$pid/comm 2>/dev/null) $(cat /proc/$pid/cmdline 2>/dev/null | tr '\\0' ' ')\"; "
-            + "done"
+            "cd /proc && for p in [0-9]*; do"
+            + " [ \"$(readlink $p/root)\" = '" + chrootPath + "' ] || continue;"
+            + " read -r _ _ _ ppid _ < $p/stat 2>/dev/null;"
+            + " read -r comm < $p/comm 2>/dev/null;"
+            + " cmd=$(tr '\\0' ' ' < $p/cmdline 2>/dev/null);"
+            + " echo \"$p $ppid $comm $cmd\";"
+            + " done"
         );
 
+        // Parse into entries, index by pid
+        java.util.Map<String, ProcessEntry> byPid = new java.util.LinkedHashMap<>();
         for (String line : output.split("\n")) {
             line = line.trim();
             if (line.isEmpty()) continue;
-            String[] parts = line.split(" ", 3);
-            if (parts.length < 2) continue;
+            String[] parts = line.split(" ", 4);
+            if (parts.length < 3) continue;
             ProcessEntry pe = new ProcessEntry();
             pe.pid = parts[0];
-            pe.name = parts[1];
-            pe.cmdline = parts.length > 2 ? parts[2].trim() : "";
-            procs.add(pe);
+            pe.ppid = parts[1];
+            pe.name = parts[2];
+            pe.cmdline = parts.length > 3 ? parts[3].trim() : "";
+            byPid.put(pe.pid, pe);
         }
 
-        return procs;
+        // Build tree: link children to parents
+        for (ProcessEntry pe : byPid.values()) {
+            ProcessEntry parent = byPid.get(pe.ppid);
+            if (parent != null) {
+                parent.children.add(pe);
+            } else {
+                pe.isLeader = true;
+            }
+        }
+
+        // Flatten tree in DFS order with depth
+        List<ProcessEntry> result = new ArrayList<>();
+        for (ProcessEntry pe : byPid.values()) {
+            if (pe.isLeader) {
+                flattenTree(pe, 0, result);
+            }
+        }
+        return result;
+    }
+
+    private void flattenTree(ProcessEntry node, int depth, List<ProcessEntry> out) {
+        node.depth = depth;
+        out.add(node);
+        for (ProcessEntry child : node.children) {
+            flattenTree(child, depth + 1, out);
+        }
     }
 
     private void promptKillProcess(ProcessEntry proc) {
+        String title = proc.isLeader ? "Kill process tree?" : "Kill process?";
+        String msg = proc.name + " (PID " + proc.pid + ")\n" + proc.cmdline;
+        if (proc.isLeader && !proc.children.isEmpty()) {
+            msg += "\n\nThis will kill " + (countTree(proc) - 1) + " child process(es) too.";
+        }
+        final String killCmd = proc.isLeader
+                ? "kill -- -$(ps -o pgid= -p " + proc.pid + " | tr -d ' ') 2>/dev/null; kill " + proc.pid + " 2>/dev/null"
+                : "kill " + proc.pid;
         new AlertDialog.Builder(this)
-                .setTitle("Kill process?")
-                .setMessage(proc.name + " (PID " + proc.pid + ")\n" + proc.cmdline)
+                .setTitle(title)
+                .setMessage(msg)
                 .setPositiveButton("Kill", (d, w) -> {
-                    suExec("kill " + proc.pid);
+                    suExec(killCmd);
                     Toast.makeText(this, "Killed " + proc.name, Toast.LENGTH_SHORT).show();
                     refreshProcs();
                 })
                 .setNegativeButton("Cancel", null)
                 .show();
+    }
+
+    private int countTree(ProcessEntry node) {
+        int count = 1;
+        for (ProcessEntry child : node.children) count += countTree(child);
+        return count;
     }
 
     // --- Shared helpers ---
@@ -460,8 +504,12 @@ public class WaylandAppLauncherActivity extends Activity {
 
     static class ProcessEntry {
         String pid;
+        String ppid;
         String name;
         String cmdline;
+        int depth; // tree depth for display indentation
+        boolean isLeader; // true if this is a process group leader (no parent in chroot)
+        List<ProcessEntry> children = new ArrayList<>();
 
         @Override
         public String toString() { return name; }
