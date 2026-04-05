@@ -25,6 +25,7 @@
 namespace android {
 
 class WaylandCompositor;
+struct WaylandSurface;
 
 // Per-positioner state for popup placement.
 struct WaylandXdgPositioner {
@@ -41,6 +42,7 @@ struct WaylandXdgPopup {
     WaylandCompositor* compositor = nullptr;
     struct wl_resource* resource = nullptr;   // xdg_popup resource
     struct wl_resource* parentSurface = nullptr; // parent wl_surface
+    WaylandSurface* ownerSurface = nullptr;   // back-pointer for cleanup
     WaylandXdgPositioner positioner;
     int32_t x = 0, y = 0; // computed position relative to parent
 };

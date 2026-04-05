@@ -245,6 +245,7 @@ void WaylandXdgShell::xdgSurfaceGetPopup(struct wl_client* client,
     WaylandSurface* ws = xdgSurface->compositor->findSurface(xdgSurface->wlSurface);
     if (ws) {
         ws->xdgPopup = popupResource;
+        popup->ownerSurface = ws;
     }
 
     // Send initial configure for the popup
@@ -437,6 +438,10 @@ void WaylandXdgShell::popupReposition(struct wl_client* /*client*/,
 void WaylandXdgShell::onPopupDestroy(struct wl_resource* resource) {
     auto* popup = static_cast<WaylandXdgPopup*>(wl_resource_get_user_data(resource));
     if (popup) {
+        // Clear the dangling xdgPopup pointer on the owning WaylandSurface.
+        if (popup->ownerSurface) {
+            popup->ownerSurface->xdgPopup = nullptr;
+        }
         delete popup;
     }
 }
