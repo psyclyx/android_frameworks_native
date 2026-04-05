@@ -1,16 +1,20 @@
 package org.lineageos.wayland;
 
-import android.app.ListActivity;
+import android.app.Activity;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Bundle;
 import android.util.Log;
+import android.view.Menu;
+import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.ListView;
+import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
+import android.widget.FrameLayout;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
@@ -24,33 +28,103 @@ import java.util.List;
 /**
  * Shows installed Linux apps from .desktop files in the configured chroot.
  * Appears as "Linux Apps" in any Android launcher.
+ * Use the refresh button in the action bar to re-scan.
  *
  * All file access goes through su since the chroot directory is not
  * readable by the system_app SELinux domain.
  */
-public class WaylandAppLauncherActivity extends ListActivity {
+public class WaylandAppLauncherActivity extends Activity {
     private static final String TAG = "WaylandAppLauncher";
 
     private List<DesktopEntry> mApps = new ArrayList<>();
+    private ListView mListView;
+    private ProgressBar mProgress;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setTitle("Linux Apps");
-        scanApps();
+
+        FrameLayout root = new FrameLayout(this);
+
+        mListView = new ListView(this);
+        root.addView(mListView, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+
+        mProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleLarge);
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.WRAP_CONTENT,
+                FrameLayout.LayoutParams.WRAP_CONTENT);
+        lp.gravity = android.view.Gravity.CENTER;
+        root.addView(mProgress, lp);
+
+        setContentView(root);
+
+        mListView.setOnItemClickListener((parent, view, position, id) -> {
+            if (position >= 0 && position < mApps.size()) {
+                launchApp(mApps.get(position));
+            }
+        });
+
+        refreshApps();
     }
 
     @Override
-    protected void onResume() {
-        super.onResume();
-        scanApps();
+    public boolean onCreateOptionsMenu(Menu menu) {
+        menu.add(0, 1, 0, "Refresh")
+                .setIcon(android.R.drawable.ic_menu_rotate)
+                .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS);
+        return true;
     }
 
     @Override
-    protected void onListItemClick(ListView l, View v, int position, long id) {
-        if (position >= 0 && position < mApps.size()) {
-            launchApp(mApps.get(position));
+    public boolean onOptionsItemSelected(MenuItem item) {
+        if (item.getItemId() == 1) {
+            refreshApps();
+            return true;
         }
+        return super.onOptionsItemSelected(item);
+    }
+
+    private void refreshApps() {
+        mProgress.setVisibility(View.VISIBLE);
+        new Thread(() -> {
+            List<DesktopEntry> apps = scanApps();
+            runOnUiThread(() -> {
+                mApps = apps;
+                mListView.setAdapter(new ArrayAdapter<DesktopEntry>(this,
+                        android.R.layout.simple_list_item_1, mApps) {
+                    @Override
+                    public View getView(int position, View convertView, ViewGroup parent) {
+                        View view = super.getView(position, convertView, parent);
+                        DesktopEntry entry = mApps.get(position);
+                        TextView text = view.findViewById(android.R.id.text1);
+                        text.setText(entry.name);
+                        text.setCompoundDrawablePadding(24);
+
+                        if (entry.icon == null && entry.iconPath != null
+                                && entry.iconPath.endsWith(".png")) {
+                            entry.icon = loadIconViaSu(entry.iconPath);
+                        }
+                        if (entry.icon != null) {
+                            Bitmap scaled = Bitmap.createScaledBitmap(entry.icon, 72, 72, true);
+                            android.graphics.drawable.BitmapDrawable d =
+                                    new android.graphics.drawable.BitmapDrawable(
+                                            getResources(), scaled);
+                            text.setCompoundDrawablesRelativeWithIntrinsicBounds(
+                                    d, null, null, null);
+                        } else {
+                            text.setCompoundDrawablesRelativeWithIntrinsicBounds(
+                                    null, null, null, null);
+                        }
+
+                        return view;
+                    }
+                });
+                mProgress.setVisibility(View.GONE);
+            });
+        }).start();
     }
 
     /** Run a command via su and return its stdout. */
@@ -75,13 +149,12 @@ public class WaylandAppLauncherActivity extends ListActivity {
         }
     }
 
-    private void scanApps() {
-        mApps.clear();
+    private List<DesktopEntry> scanApps() {
+        List<DesktopEntry> apps = new ArrayList<>();
 
         String chrootPath = WaylandConfig.getChrootPath(this);
         String appsDir = chrootPath + "/usr/share/applications";
 
-        // Dump all .desktop files with a separator between each
         String output = suExec(
             "for f in " + appsDir + "/*.desktop; do "
             + "[ -f \"$f\" ] && echo '===FILE:'\"$f\"'===' && cat \"$f\"; "
@@ -90,11 +163,9 @@ public class WaylandAppLauncherActivity extends ListActivity {
 
         if (output.isEmpty()) {
             Log.w(TAG, "No .desktop files found in " + appsDir);
-            setListAdapter(null);
-            return;
+            return apps;
         }
 
-        // Parse the concatenated output
         String currentFile = null;
         List<String> currentLines = new ArrayList<>();
 
@@ -103,7 +174,7 @@ public class WaylandAppLauncherActivity extends ListActivity {
                 if (currentFile != null) {
                     DesktopEntry entry = parseDesktopLines(currentFile, currentLines);
                     if (entry != null && !entry.noDisplay && entry.exec != null) {
-                        mApps.add(entry);
+                        apps.add(entry);
                     }
                 }
                 currentFile = line.substring(8, line.length() - 3);
@@ -112,51 +183,23 @@ public class WaylandAppLauncherActivity extends ListActivity {
                 currentLines.add(line);
             }
         }
-        // Handle last file
         if (currentFile != null) {
             DesktopEntry entry = parseDesktopLines(currentFile, currentLines);
             if (entry != null && !entry.noDisplay && entry.exec != null) {
-                mApps.add(entry);
+                apps.add(entry);
             }
         }
 
-        Collections.sort(mApps, (a, b) -> a.name.compareToIgnoreCase(b.name));
+        Collections.sort(apps, (a, b) -> a.name.compareToIgnoreCase(b.name));
 
-        // Resolve icons via su
-        for (DesktopEntry entry : mApps) {
+        for (DesktopEntry entry : apps) {
             if (entry.iconName != null) {
                 entry.iconPath = resolveIconPath(chrootPath, entry.iconName);
             }
         }
 
-        setListAdapter(new ArrayAdapter<DesktopEntry>(this,
-                android.R.layout.simple_list_item_1, mApps) {
-            @Override
-            public View getView(int position, View convertView, ViewGroup parent) {
-                View view = super.getView(position, convertView, parent);
-                DesktopEntry entry = mApps.get(position);
-                TextView text = view.findViewById(android.R.id.text1);
-                text.setText(entry.name);
-                text.setCompoundDrawablePadding(24);
-
-                if (entry.icon == null && entry.iconPath != null
-                        && entry.iconPath.endsWith(".png")) {
-                    entry.icon = loadIconViaSu(entry.iconPath);
-                }
-                if (entry.icon != null) {
-                    Bitmap scaled = Bitmap.createScaledBitmap(entry.icon, 72, 72, true);
-                    android.graphics.drawable.BitmapDrawable d =
-                            new android.graphics.drawable.BitmapDrawable(getResources(), scaled);
-                    text.setCompoundDrawablesRelativeWithIntrinsicBounds(d, null, null, null);
-                } else {
-                    text.setCompoundDrawablesRelativeWithIntrinsicBounds(null, null, null, null);
-                }
-
-                return view;
-            }
-        });
-
-        Log.i(TAG, "Found " + mApps.size() + " apps in " + appsDir);
+        Log.i(TAG, "Found " + apps.size() + " apps in " + appsDir);
+        return apps;
     }
 
     private DesktopEntry parseDesktopLines(String filePath, List<String> lines) {
@@ -204,7 +247,6 @@ public class WaylandAppLauncherActivity extends ListActivity {
             return chrootPath + iconName;
         }
 
-        // Ask su to find the icon file
         String[] sizes = {"48x48", "64x64", "128x128", "scalable"};
         String[] themes = {"hicolor", "Adwaita"};
         String[] categories = {"apps", "categories", "mimetypes"};
@@ -276,8 +318,11 @@ public class WaylandAppLauncherActivity extends ListActivity {
                     + " WAYLAND_DISPLAY=wayland-0"
                     + " LANG=C.UTF-8"
                     + " TERM=xterm-256color"
+                    + " TMPDIR=/tmp"
                     + " GDK_BACKEND=wayland"
-                    + " " + cmd;
+                    + " GSK_RENDERER=cairo"
+                    + " GDK_GL=disabled"
+                    + " dbus-run-session " + cmd;
                 Log.i(TAG, "Full command: su 0 sh -c '" + fullCmd + "'");
                 Process p = Runtime.getRuntime().exec(new String[]{
                     "su", "0", "sh", "-c", fullCmd
