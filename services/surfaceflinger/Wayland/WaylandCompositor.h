@@ -85,6 +85,10 @@ public:
     void requestSetExclusiveZones(int top, int right, int bottom, int left);
     void reparentLayerUnderWindow(int layerId, const sp<IBinder>& windowHandle);
 
+    // Dismiss all open popups belonging to the given client.
+    // Sends xdg_popup_send_popup_done and triggers cleanup.
+    void dismissPopupsForClient(struct wl_client* client);
+
     // Queue frame callbacks to be fired after the next composite cycle.
     void queueFrameCallbacks(std::vector<struct wl_resource*>&& callbacks);
     // Dispatch pending Wayland events. Called from SF composite cycle.
@@ -222,6 +226,8 @@ public:
         int dmabufFd = -1; // dup'd dmabuf fd for sync (buffer thread will close)
         sp<Fence> acquireFence; // GPU fence extracted at commit time
         struct wl_resource* wlBuffer = nullptr; // for fence-based release tracking
+        // Crop rect (buffer pixels) from set_window_geometry — clips CSD shadows.
+        int32_t cropX = 0, cropY = 0, cropW = 0, cropH = 0;
     };
     void postBufferWork(BufferWork&& work);
 

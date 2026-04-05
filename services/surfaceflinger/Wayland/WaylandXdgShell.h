@@ -59,6 +59,8 @@ struct WaylandXdgSurface {
     std::string title;
     std::string appId;
     bool mapped = false; // true after first commit triggers window creation
+    // Window geometry (surface-local coords, excludes shadows/CSD borders)
+    int32_t geomX = 0, geomY = 0, geomWidth = 0, geomHeight = 0;
 };
 
 // Manages xdg_wm_base global, xdg_surface, and xdg_toplevel.

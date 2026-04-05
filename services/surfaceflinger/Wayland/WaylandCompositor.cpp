@@ -760,6 +760,17 @@ void WaylandCompositor::dispatchKey(int layerId, uint32_t timeMs, uint32_t evdev
     if (mWakeEventFd >= 0) { uint64_t v=1; write(mWakeEventFd, &v, sizeof(v)); }
 }
 
+void WaylandCompositor::dismissPopupsForClient(struct wl_client* client) {
+    for (auto& [res, surface] : mSurfaces) {
+        if (surface->xdgPopup &&
+            wl_resource_get_client(surface->resource) == client) {
+            xdg_popup_send_popup_done(surface->xdgPopup);
+            ALOGI("dismissPopupsForClient: sent popup_done for layer %u",
+                  surface->layerId);
+        }
+    }
+}
+
 void WaylandCompositor::dispatchPopupDismiss(int layerId) {
     {
         std::lock_guard<std::mutex> lock(mCallbacksMutex);
@@ -1131,7 +1142,14 @@ void WaylandCompositor::bufferThreadLoop() {
                 cs.state.bufferData->releaseBufferEndpoint =
                         IInterface::asBinder(mReleaseListener);
             }
-            cs.state.crop = FloatRect(0, 0, item.width, item.height);
+            // Use window geometry as crop if set (clips CSD shadows).
+            if (item.cropW > 0 && item.cropH > 0) {
+                cs.state.crop = FloatRect(item.cropX, item.cropY,
+                                          item.cropX + item.cropW,
+                                          item.cropY + item.cropH);
+            } else {
+                cs.state.crop = FloatRect(0, 0, item.width, item.height);
+            }
 
             // Register a per-layer callback so SF invokes onReleaseBuffer with
             // HWC's release fence when the buffer is replaced.

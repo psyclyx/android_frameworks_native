@@ -259,10 +259,17 @@ void WaylandXdgShell::xdgSurfaceGetPopup(struct wl_client* client,
 }
 
 void WaylandXdgShell::xdgSurfaceSetWindowGeometry(struct wl_client* /*client*/,
-                                                    struct wl_resource* /*resource*/,
-                                                    int32_t /*x*/, int32_t /*y*/,
-                                                    int32_t /*width*/, int32_t /*height*/) {
-    // Ignored for MVP.
+                                                    struct wl_resource* resource,
+                                                    int32_t x, int32_t y,
+                                                    int32_t width, int32_t height) {
+    auto* xdgSurface = static_cast<WaylandXdgSurface*>(wl_resource_get_user_data(resource));
+    if (xdgSurface) {
+        xdgSurface->geomX = x;
+        xdgSurface->geomY = y;
+        xdgSurface->geomWidth = width;
+        xdgSurface->geomHeight = height;
+        ALOGD("set_window_geometry: %d,%d %dx%d", x, y, width, height);
+    }
 }
 
 void WaylandXdgShell::xdgSurfaceAckConfigure(struct wl_client* /*client*/,
@@ -438,9 +445,12 @@ void WaylandXdgShell::popupReposition(struct wl_client* /*client*/,
 void WaylandXdgShell::onPopupDestroy(struct wl_resource* resource) {
     auto* popup = static_cast<WaylandXdgPopup*>(wl_resource_get_user_data(resource));
     if (popup) {
-        // Clear the dangling xdgPopup pointer on the owning WaylandSurface.
+        // Clear the dangling xdgPopup pointer on the owning WaylandSurface
+        // and destroy the Android popup window.
         if (popup->ownerSurface) {
             popup->ownerSurface->xdgPopup = nullptr;
+            popup->compositor->requestDestroyWindow(
+                    static_cast<int>(popup->ownerSurface->layerId));
         }
         delete popup;
     }

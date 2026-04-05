@@ -214,6 +214,20 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
         surface->pendingBuffer = nullptr;
     }
 
+    // Update window geometry (crop rect) from xdg_surface for CSD shadow clipping.
+    // Window geometry is in surface-local coords; multiply by output scale for buffer pixels.
+    if (surface->xdgSurface) {
+        auto* xdgSurf = static_cast<WaylandXdgSurface*>(
+                wl_resource_get_user_data(surface->xdgSurface));
+        if (xdgSurf && xdgSurf->geomWidth > 0 && xdgSurf->geomHeight > 0) {
+            int32_t scale = surface->compositor->outputScale();
+            surface->cropX = xdgSurf->geomX * scale;
+            surface->cropY = xdgSurf->geomY * scale;
+            surface->cropW = xdgSurf->geomWidth * scale;
+            surface->cropH = xdgSurf->geomHeight * scale;
+        }
+    }
+
     // Deferred window creation: on first commit with a buffer, if this surface
     // has an xdg role (toplevel or popup), create the Android window now.
     if (surface->xdgSurface && surface->currentBuffer) {
@@ -222,6 +236,11 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
         if (xdgSurf && !xdgSurf->mapped) {
             if (xdgSurf->toplevel) {
                 xdgSurf->mapped = true;
+
+                // Dismiss any open popups from this client (e.g. menu that
+                // triggered this dialog).
+                surface->compositor->dismissPopupsForClient(
+                        wl_resource_get_client(resource));
 
                 // Resolve parent layerId (-1 = no parent = top-level Activity)
                 int parentLayerId = -1;
@@ -237,19 +256,24 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
                     }
                 }
 
-                // Get buffer dimensions for dialog sizing
-                int bufW = 0, bufH = 0;
-                if (surface->currentBuffer) {
+                // Get buffer dimensions for dialog sizing.
+                // Prefer window geometry (excludes CSD shadows) over raw buffer size.
+                int winW = 0, winH = 0;
+                if (xdgSurf->geomWidth > 0 && xdgSurf->geomHeight > 0) {
+                    int32_t scale = surface->compositor->outputScale();
+                    winW = xdgSurf->geomWidth * scale;
+                    winH = xdgSurf->geomHeight * scale;
+                } else if (surface->currentBuffer) {
                     auto* bufBase = static_cast<WaylandBufferBase*>(
                             wl_resource_get_user_data(surface->currentBuffer));
                     if (bufBase && bufBase->bufferType == WaylandBufferType::Dmabuf) {
                         auto* dmabuf = static_cast<WaylandDmabufBuffer*>(bufBase);
-                        bufW = dmabuf->width;
-                        bufH = dmabuf->height;
+                        winW = dmabuf->width;
+                        winH = dmabuf->height;
                     } else if (bufBase && bufBase->bufferType == WaylandBufferType::Shm) {
                         auto* shm = static_cast<WaylandShmBuffer*>(bufBase);
-                        bufW = shm->width;
-                        bufH = shm->height;
+                        winW = shm->width;
+                        winH = shm->height;
                     }
                 }
 
@@ -257,7 +281,7 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
                         static_cast<int>(surface->layerId), surface->handle,
                         xdgSurf->title.empty() ? nullptr : xdgSurf->title.c_str(),
                         xdgSurf->appId.empty() ? nullptr : xdgSurf->appId.c_str(),
-                        parentLayerId, bufW, bufH);
+                        parentLayerId, winW, winH);
             } else if (xdgSurf->popup) {
                 xdgSurf->mapped = true;
 
@@ -446,6 +470,10 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf,
     bw.height = dmabuf->height;
     bw.dmabufFd = dup(dmabuf->planes[0].fd);
     bw.wlBuffer = wlBuffer; // track for fence-based release
+    bw.cropX = cropX;
+    bw.cropY = cropY;
+    bw.cropW = cropW;
+    bw.cropH = cropH;
 
     // Extract GPU fence NOW on the dispatch thread — by the time the buffer
     // thread processes this, the GPU will likely have finished and the fence
@@ -512,6 +540,10 @@ void WaylandSurface::importShmBuffer(WaylandShmBuffer* shm) {
     work.layerId = layerId;
     work.width = shm->width;
     work.height = shm->height;
+    work.cropX = cropX;
+    work.cropY = cropY;
+    work.cropW = cropW;
+    work.cropH = cropH;
     compositor->postBufferWork(std::move(work));
 
     ALOGD("wl_surface.commit: queued SHM %dx%d buffer (fmt=0x%08x) to layer %u, frame %" PRIu64,
