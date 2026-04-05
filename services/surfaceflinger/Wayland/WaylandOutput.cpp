@@ -82,7 +82,10 @@ void WaylandOutput::bind(struct wl_client* client, void* data,
                         refreshMHz);
 
     if (ver >= WL_OUTPUT_SCALE_SINCE_VERSION) {
-        wl_output_send_scale(resource, 1);
+        // Scale based on resolution: phones with >=1080px width need 2x
+        // to make Wayland app content usable at phone DPI.
+        int32_t scale = (width >= 1080) ? 2 : 1;
+        wl_output_send_scale(resource, scale);
     }
 
     if (ver >= WL_OUTPUT_DONE_SINCE_VERSION) {
