@@ -326,11 +326,13 @@ void WaylandLayerShell::applyLayout(WaylandLayerSurface* ls) {
 
     TransactionState txn;
     ComposerState cs;
-    cs.state.what = layer_state_t::ePositionChanged | layer_state_t::eLayerChanged;
+    cs.state.what = layer_state_t::ePositionChanged | layer_state_t::eLayerChanged
+                  | layer_state_t::eAlphaChanged;
     cs.state.surface = ws->handle;
     cs.state.x = static_cast<float>(x);
     cs.state.y = static_cast<float>(y);
     cs.state.z = z;
+    cs.state.color.a = 1.0f; // unhide: layer was created with alpha=0
     txn.mComposerStates.push_back(std::move(cs));
     txn.mId = (static_cast<uint64_t>(ws->layerId) << 32) | 0x31000000;
     ls->compositor->flinger().setTransactionState(std::move(txn), nullptr);

@@ -383,13 +383,17 @@ void WaylandCompositor::compositorCreateSurface(struct wl_client* client,
         return;
     }
 
-    // Place the Wayland layer above normal app layers so it's visible.
+    // Place the Wayland layer above normal app layers but keep it hidden
+    // (alpha=0) until reparented under an Activity window. This prevents
+    // a flash of the raw buffer at its initial size before the Activity
+    // wraps and resizes it.
     {
         TransactionState txn;
         ComposerState cs;
-        cs.state.what = layer_state_t::eLayerChanged;
+        cs.state.what = layer_state_t::eLayerChanged | layer_state_t::eAlphaChanged;
         cs.state.surface = result.handle;
         cs.state.z = 0x7FFFFFFE; // just below max, above all apps
+        cs.state.color.a = 0.0f;
         txn.mComposerStates.push_back(cs);
         txn.mId = static_cast<uint64_t>(surfaceNum) | (1ULL << 48);
         self->mFlinger.setTransactionState(std::move(txn), /*applyToken=*/nullptr);
@@ -747,8 +751,9 @@ void WaylandCompositor::reparentLayerUnderWindow(int layerId, const sp<IBinder>&
     ComposerState cs;
     cs.state.surface = waylandHandle;
     cs.state.updateParentLayer(parentSc);
-    cs.state.what |= layer_state_t::eLayerChanged;
+    cs.state.what |= layer_state_t::eLayerChanged | layer_state_t::eAlphaChanged;
     cs.state.z = 0;
+    cs.state.color.a = 1.0f; // unhide: layer was created with alpha=0
     txn.mComposerStates.push_back(std::move(cs));
     txn.mId = static_cast<uint64_t>(layerId) | (2ULL << 48);
     mFlinger.setTransactionState(std::move(txn), /*applyToken=*/nullptr);
