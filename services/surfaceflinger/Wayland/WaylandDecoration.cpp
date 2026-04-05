@@ -18,10 +18,12 @@
 #define LOG_TAG "WaylandDecoration"
 
 #include "WaylandDecoration.h"
+#include "WaylandXdgShell.h"
 
 #include <algorithm>
 #include <log/log.h>
 #include <xdg-decoration-unstable-v1-server-protocol.h>
+#include <xdg-shell-server-protocol.h>
 
 namespace android {
 
@@ -61,7 +63,7 @@ void managerDestroy(struct wl_client* /*client*/, struct wl_resource* resource) 
 }
 
 void managerGetToplevelDecoration(struct wl_client* client, struct wl_resource* resource,
-                                   uint32_t id, struct wl_resource* /*toplevel*/) {
+                                   uint32_t id, struct wl_resource* toplevel) {
     int ver = wl_resource_get_version(resource);
     struct wl_resource* decoration =
             wl_resource_create(client, &zxdg_toplevel_decoration_v1_interface, ver, id);
@@ -71,11 +73,26 @@ void managerGetToplevelDecoration(struct wl_client* client, struct wl_resource* 
     }
     wl_resource_set_implementation(decoration, &kDecorationImpl, nullptr, nullptr);
 
-    // Immediately tell the client to use server-side decorations.
+    // Send SERVER_SIDE mode followed by a new xdg_surface.configure so the
+    // client sees the decoration mode as part of a configure cycle.
     zxdg_toplevel_decoration_v1_send_configure(decoration,
             ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
 
-    ALOGD("Created toplevel decoration, sent SERVER_SIDE configure");
+    // Find the xdg_surface for this toplevel and send a new configure sequence.
+    auto* xdgSurface = static_cast<WaylandXdgSurface*>(wl_resource_get_user_data(toplevel));
+    if (xdgSurface && xdgSurface->resource && xdgSurface->toplevel) {
+        struct wl_array states;
+        wl_array_init(&states);
+        uint32_t* s = static_cast<uint32_t*>(wl_array_add(&states, sizeof(uint32_t)));
+        *s = XDG_TOPLEVEL_STATE_ACTIVATED;
+        xdg_toplevel_send_configure(xdgSurface->toplevel, 0, 0, &states);
+        wl_array_release(&states);
+
+        xdgSurface->pendingConfigureSerial++;
+        xdg_surface_send_configure(xdgSurface->resource, xdgSurface->pendingConfigureSerial);
+    }
+
+    ALOGD("Created toplevel decoration, sent SERVER_SIDE + configure");
 }
 
 const struct zxdg_decoration_manager_v1_interface kManagerImpl = {
