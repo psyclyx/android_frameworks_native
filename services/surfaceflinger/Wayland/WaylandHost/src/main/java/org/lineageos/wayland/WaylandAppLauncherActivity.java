@@ -1,20 +1,21 @@
 package org.lineageos.wayland;
 
+import android.app.ActionBar;
 import android.app.Activity;
+import android.app.AlertDialog;
+import android.app.FragmentTransaction;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.os.Bundle;
 import android.util.Log;
-import android.view.Menu;
-import android.view.MenuItem;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.ArrayAdapter;
 import android.widget.ListView;
-import android.widget.ProgressBar;
 import android.widget.TextView;
 import android.widget.Toast;
-import android.widget.FrameLayout;
+
+import androidx.swiperefreshlayout.widget.SwipeRefreshLayout;
 
 import java.io.BufferedReader;
 import java.io.ByteArrayOutputStream;
@@ -26,74 +27,91 @@ import java.util.Collections;
 import java.util.List;
 
 /**
- * Shows installed Linux apps from .desktop files in the configured chroot.
- * Appears as "Linux Apps" in any Android launcher.
- * Use the refresh button in the action bar to re-scan.
- *
- * All file access goes through su since the chroot directory is not
- * readable by the system_app SELinux domain.
+ * Shows installed Linux apps from .desktop files in the configured chroot,
+ * plus a tab to view and kill running Linux processes.
+ * Pull down to refresh either list.
  */
 public class WaylandAppLauncherActivity extends Activity {
     private static final String TAG = "WaylandAppLauncher";
 
+    private SwipeRefreshLayout mAppsRefresh;
+    private ListView mAppsListView;
     private List<DesktopEntry> mApps = new ArrayList<>();
-    private ListView mListView;
-    private ProgressBar mProgress;
+
+    private SwipeRefreshLayout mProcsRefresh;
+    private ListView mProcsListView;
+    private List<ProcessEntry> mProcs = new ArrayList<>();
+
+    private int mCurrentTab = 0; // 0=Apps, 1=Processes
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setTitle("Linux Apps");
 
-        FrameLayout root = new FrameLayout(this);
-
-        mListView = new ListView(this);
-        root.addView(mListView, new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.MATCH_PARENT,
-                FrameLayout.LayoutParams.MATCH_PARENT));
-
-        mProgress = new ProgressBar(this, null, android.R.attr.progressBarStyleLarge);
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                FrameLayout.LayoutParams.WRAP_CONTENT,
-                FrameLayout.LayoutParams.WRAP_CONTENT);
-        lp.gravity = android.view.Gravity.CENTER;
-        root.addView(mProgress, lp);
-
-        setContentView(root);
-
-        mListView.setOnItemClickListener((parent, view, position, id) -> {
-            if (position >= 0 && position < mApps.size()) {
-                launchApp(mApps.get(position));
-            }
+        // --- Apps tab ---
+        mAppsListView = new ListView(this);
+        mAppsRefresh = new SwipeRefreshLayout(this);
+        mAppsRefresh.addView(mAppsListView);
+        mAppsRefresh.setOnRefreshListener(this::refreshApps);
+        mAppsListView.setOnItemClickListener((parent, view, pos, id) -> {
+            if (pos >= 0 && pos < mApps.size()) launchApp(mApps.get(pos));
         });
+
+        // --- Processes tab ---
+        mProcsListView = new ListView(this);
+        mProcsRefresh = new SwipeRefreshLayout(this);
+        mProcsRefresh.addView(mProcsListView);
+        mProcsRefresh.setOnRefreshListener(this::refreshProcs);
+        mProcsListView.setOnItemClickListener((parent, view, pos, id) -> {
+            if (pos >= 0 && pos < mProcs.size()) promptKillProcess(mProcs.get(pos));
+        });
+
+        // Start with apps tab
+        setContentView(mAppsRefresh);
+
+        // Action bar tabs
+        ActionBar ab = getActionBar();
+        if (ab != null) {
+            ab.setNavigationMode(ActionBar.NAVIGATION_MODE_TABS);
+            ab.addTab(ab.newTab().setText("Apps").setTabListener(new TabSwitcher(0)));
+            ab.addTab(ab.newTab().setText("Processes").setTabListener(new TabSwitcher(1)));
+        }
 
         refreshApps();
     }
 
-    @Override
-    public boolean onCreateOptionsMenu(Menu menu) {
-        menu.add(0, 1, 0, "Refresh")
-                .setIcon(android.R.drawable.ic_menu_rotate)
-                .setShowAsAction(MenuItem.SHOW_AS_ACTION_ALWAYS);
-        return true;
+    private class TabSwitcher implements ActionBar.TabListener {
+        private final int tab;
+        TabSwitcher(int tab) { this.tab = tab; }
+
+        @Override
+        public void onTabSelected(ActionBar.Tab t, FragmentTransaction ft) {
+            mCurrentTab = tab;
+            if (tab == 0) {
+                setContentView(mAppsRefresh);
+                refreshApps();
+            } else {
+                setContentView(mProcsRefresh);
+                refreshProcs();
+            }
+        }
+
+        @Override public void onTabUnselected(ActionBar.Tab t, FragmentTransaction ft) {}
+        @Override public void onTabReselected(ActionBar.Tab t, FragmentTransaction ft) {
+            if (tab == 0) refreshApps(); else refreshProcs();
+        }
     }
 
-    @Override
-    public boolean onOptionsItemSelected(MenuItem item) {
-        if (item.getItemId() == 1) {
-            refreshApps();
-            return true;
-        }
-        return super.onOptionsItemSelected(item);
-    }
+    // --- Apps ---
 
     private void refreshApps() {
-        mProgress.setVisibility(View.VISIBLE);
+        mAppsRefresh.setRefreshing(true);
         new Thread(() -> {
             List<DesktopEntry> apps = scanApps();
             runOnUiThread(() -> {
                 mApps = apps;
-                mListView.setAdapter(new ArrayAdapter<DesktopEntry>(this,
+                mAppsListView.setAdapter(new ArrayAdapter<DesktopEntry>(this,
                         android.R.layout.simple_list_item_1, mApps) {
                     @Override
                     public View getView(int position, View convertView, ViewGroup parent) {
@@ -102,6 +120,7 @@ public class WaylandAppLauncherActivity extends Activity {
                         TextView text = view.findViewById(android.R.id.text1);
                         text.setText(entry.name);
                         text.setCompoundDrawablePadding(24);
+                        text.setMinHeight(128);
 
                         if (entry.icon == null && entry.iconPath != null
                                 && entry.iconPath.endsWith(".png")) {
@@ -118,16 +137,85 @@ public class WaylandAppLauncherActivity extends Activity {
                             text.setCompoundDrawablesRelativeWithIntrinsicBounds(
                                     null, null, null, null);
                         }
-
                         return view;
                     }
                 });
-                mProgress.setVisibility(View.GONE);
+                mAppsRefresh.setRefreshing(false);
             });
         }).start();
     }
 
-    /** Run a command via su and return its stdout. */
+    // --- Processes ---
+
+    private void refreshProcs() {
+        mProcsRefresh.setRefreshing(true);
+        new Thread(() -> {
+            List<ProcessEntry> procs = scanProcesses();
+            runOnUiThread(() -> {
+                mProcs = procs;
+                mProcsListView.setAdapter(new ArrayAdapter<ProcessEntry>(this,
+                        android.R.layout.simple_list_item_2,
+                        android.R.id.text1, mProcs) {
+                    @Override
+                    public View getView(int position, View convertView, ViewGroup parent) {
+                        View view = super.getView(position, convertView, parent);
+                        ProcessEntry proc = mProcs.get(position);
+                        TextView text1 = view.findViewById(android.R.id.text1);
+                        TextView text2 = view.findViewById(android.R.id.text2);
+                        text1.setText(proc.name);
+                        text2.setText("PID " + proc.pid + "  " + proc.cmdline);
+                        return view;
+                    }
+                });
+                mProcsRefresh.setRefreshing(false);
+            });
+        }).start();
+    }
+
+    private List<ProcessEntry> scanProcesses() {
+        List<ProcessEntry> procs = new ArrayList<>();
+        String chrootPath = WaylandConfig.getChrootPath(this);
+
+        // Find all processes whose root is the chroot
+        String output = suExec(
+            "for p in /proc/[0-9]*/root; do "
+            + "pid=$(echo $p | cut -d/ -f3); "
+            + "root=$(readlink $p 2>/dev/null); "
+            + "[ \"$root\" = \"" + chrootPath + "\" ] && "
+            + "echo \"$pid $(cat /proc/$pid/comm 2>/dev/null) $(cat /proc/$pid/cmdline 2>/dev/null | tr '\\0' ' ')\"; "
+            + "done"
+        );
+
+        for (String line : output.split("\n")) {
+            line = line.trim();
+            if (line.isEmpty()) continue;
+            String[] parts = line.split(" ", 3);
+            if (parts.length < 2) continue;
+            ProcessEntry pe = new ProcessEntry();
+            pe.pid = parts[0];
+            pe.name = parts[1];
+            pe.cmdline = parts.length > 2 ? parts[2].trim() : "";
+            procs.add(pe);
+        }
+
+        return procs;
+    }
+
+    private void promptKillProcess(ProcessEntry proc) {
+        new AlertDialog.Builder(this)
+                .setTitle("Kill process?")
+                .setMessage(proc.name + " (PID " + proc.pid + ")\n" + proc.cmdline)
+                .setPositiveButton("Kill", (d, w) -> {
+                    suExec("kill " + proc.pid);
+                    Toast.makeText(this, "Killed " + proc.name, Toast.LENGTH_SHORT).show();
+                    refreshProcs();
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    // --- Shared helpers ---
+
     private String suExec(String cmd) {
         try {
             Process p = Runtime.getRuntime().exec(new String[]{
@@ -151,7 +239,6 @@ public class WaylandAppLauncherActivity extends Activity {
 
     private List<DesktopEntry> scanApps() {
         List<DesktopEntry> apps = new ArrayList<>();
-
         String chrootPath = WaylandConfig.getChrootPath(this);
         String appsDir = chrootPath + "/usr/share/applications";
 
@@ -345,8 +432,15 @@ public class WaylandAppLauncherActivity extends Activity {
         Bitmap icon;
 
         @Override
-        public String toString() {
-            return name;
-        }
+        public String toString() { return name; }
+    }
+
+    static class ProcessEntry {
+        String pid;
+        String name;
+        String cmdline;
+
+        @Override
+        public String toString() { return name; }
     }
 }

@@ -9,6 +9,9 @@ android_app {
     aidl: {
         local_include_dirs: ["src/main/aidl"],
     },
+    static_libs: [
+        "androidx.swiperefreshlayout_swiperefreshlayout",
+    ],
     platform_apis: true,
     certificate: "platform",
     privileged: true,
