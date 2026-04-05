@@ -289,6 +289,10 @@ bool WaylandCompositor::init(const sp<Looper>& /*looper*/) {
         }
     });
 
+    // HWC release fence listener — receives fences when HWC finishes scanning
+    // a dmabuf buffer so we can import the fence and release to the client.
+    mReleaseListener = sp<ReleaseListener>::make(*this);
+
     // Buffer submission thread — handles gralloc alloc + setTransactionState
     // off the Wayland dispatch thread to avoid deadlocking with SF or Vulkan WSI.
     mBufferThread = std::thread([this]() { bufferThreadLoop(); });
@@ -838,13 +842,102 @@ void WaylandCompositor::notifyBufferDestroyed(struct wl_resource* buffer) {
         }
     }
 
-    // Remove from both release queues.
+    // Remove from both release queues (SHM path).
     {
         std::lock_guard<std::mutex> lock(mCallbacksMutex);
         auto it = std::remove(mPendingBufferReleases.begin(), mPendingBufferReleases.end(), buffer);
         mPendingBufferReleases.erase(it, mPendingBufferReleases.end());
         auto it2 = std::remove(mReadyBufferReleases.begin(), mReadyBufferReleases.end(), buffer);
         mReadyBufferReleases.erase(it2, mReadyBufferReleases.end());
+    }
+    // Remove from pending dmabuf release map (fence-based path).
+    {
+        std::lock_guard<std::mutex> lock(mReleaseMutex);
+        for (auto it = mPendingDmabufReleases.begin(); it != mPendingDmabufReleases.end(); ) {
+            if (it->second.buffer == buffer) {
+                if (it->second.dmabufFd >= 0) close(it->second.dmabufFd);
+                it = mPendingDmabufReleases.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+}
+
+// --- HWC release fence handling ---
+
+void WaylandCompositor::ReleaseListener::onTransactionCompleted(ListenerStats stats) {
+    ALOGI("onTransactionCompleted: %zu transactions", stats.transactionStats.size());
+    for (const auto& transactionStats : stats.transactionStats) {
+        for (const auto& surfaceStats : transactionStats.surfaceStats) {
+            ALOGI("  surfaceStats: prevReleaseId=%" PRIu64 "/%" PRIu64 " fence=%s",
+                  surfaceStats.previousReleaseCallbackId.bufferId,
+                  surfaceStats.previousReleaseCallbackId.framenumber,
+                  surfaceStats.previousReleaseFence ? "yes" : "no");
+            if (surfaceStats.previousReleaseCallbackId != ReleaseCallbackId::INVALID_ID) {
+                mCompositor.onBufferReleased(
+                        surfaceStats.previousReleaseCallbackId.bufferId,
+                        surfaceStats.previousReleaseCallbackId.framenumber,
+                        surfaceStats.previousReleaseFence);
+            }
+        }
+    }
+}
+
+void WaylandCompositor::ReleaseListener::onReleaseBuffer(
+        ReleaseCallbackId callbackId, sp<Fence> releaseFence,
+        uint32_t /*currentMaxAcquiredBufferCount*/, bool /*removeFromCache*/) {
+    ALOGE("WaylandRelease: onReleaseBuffer bufferId=%" PRIu64 " frame=%" PRIu64 " fence=%s",
+          callbackId.bufferId, callbackId.framenumber,
+          releaseFence && releaseFence->isValid() ? "valid" : "none");
+    mCompositor.onBufferReleased(callbackId.bufferId, callbackId.framenumber,
+                                 std::move(releaseFence));
+}
+
+void WaylandCompositor::onBufferReleased(uint64_t bufferId, uint64_t /*frameNumber*/,
+                                          sp<Fence> releaseFence) {
+    PendingRelease pr;
+    {
+        std::lock_guard<std::mutex> lock(mReleaseMutex);
+        auto it = mPendingDmabufReleases.find(bufferId);
+        if (it == mPendingDmabufReleases.end()) return;
+        pr = it->second;
+        mPendingDmabufReleases.erase(it);
+    }
+
+    // Import HWC's release fence into the dma-buf so the client's next GPU
+    // submission on this buffer waits until the display is done scanning.
+    if (pr.dmabufFd >= 0 && releaseFence && releaseFence->isValid()) {
+        int fenceFd = releaseFence->dup();
+        if (fenceFd >= 0) {
+            struct dma_buf_import_sync_file importSync = {};
+            importSync.flags = DMA_BUF_SYNC_WRITE; // client will write next
+            importSync.fd = fenceFd;
+            if (ioctl(pr.dmabufFd, DMA_BUF_IOCTL_IMPORT_SYNC_FILE, &importSync) != 0) {
+                ALOGW("onBufferReleased: DMA_BUF_IOCTL_IMPORT_SYNC_FILE failed: %s",
+                      strerror(errno));
+            } else {
+                ALOGD("onBufferReleased: imported HWC release fence into dmabuf");
+            }
+            close(fenceFd);
+        }
+    }
+    if (pr.dmabufFd >= 0) {
+        close(pr.dmabufFd);
+    }
+
+    // Queue the wl_buffer release to fire on the Wayland dispatch thread.
+    if (pr.buffer) {
+        {
+            std::lock_guard<std::mutex> lock(mCallbacksMutex);
+            // Put directly into ready queue — the fence is already imported,
+            // so it's safe for the client to reuse (GPU will wait on fence).
+            mReadyBufferReleases.push_back(pr.buffer);
+        }
+        if (mWakeEventFd >= 0) {
+            uint64_t val = 1;
+            write(mWakeEventFd, &val, sizeof(val));
+        }
     }
 }
 
@@ -920,27 +1013,32 @@ void WaylandCompositor::bufferThreadLoop() {
 
             if (!gb) continue;
 
-            sp<Fence> acquireFence = Fence::NO_FENCE;
+            // Use the GPU fence extracted at commit time (on the dispatch
+            // thread) so it's captured before the GPU finishes.
+            sp<Fence> acquireFence = item.acquireFence ? item.acquireFence
+                                                       : Fence::NO_FENCE;
+
+            // For dmabuf zero-copy: register for HWC release fence callback
+            // so we can import the fence into the dma-buf before releasing
+            // the buffer back to the client.
+            bool hasDmabuf = item.dmabufFd >= 0 && item.wlBuffer;
+            if (hasDmabuf) {
+                std::lock_guard<std::mutex> lock(mReleaseMutex);
+                PendingRelease pr;
+                pr.buffer = item.wlBuffer;
+                pr.dmabufFd = item.dmabufFd;
+                item.dmabufFd = -1; // ownership transferred
+                mPendingDmabufReleases[gb->getId()] = pr;
+            }
             if (item.dmabufFd >= 0) {
-                struct dma_buf_export_sync_file exportSync = {};
-                exportSync.flags = DMA_BUF_SYNC_READ;
-                exportSync.fd = -1;
-                if (ioctl(item.dmabufFd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &exportSync) == 0 &&
-                    exportSync.fd >= 0) {
-                    acquireFence = sp<Fence>::make(exportSync.fd);
-                    ALOGD("BufferThread: got GPU fence fd=%d for layer %u",
-                          exportSync.fd, item.layerId);
-                } else {
-                    ALOGW("BufferThread: DMA_BUF_IOCTL_EXPORT_SYNC_FILE failed: %s",
-                          strerror(errno));
-                }
                 close(item.dmabufFd);
                 item.dmabufFd = -1;
             }
 
             TransactionState txn;
             ComposerState cs;
-            cs.state.what = layer_state_t::eBufferChanged | layer_state_t::eCropChanged;
+            cs.state.what = layer_state_t::eBufferChanged | layer_state_t::eCropChanged |
+                            (hasDmabuf ? layer_state_t::eHasListenerCallbacksChanged : 0);
             cs.state.surface = item.handle;
             cs.state.bufferData = std::make_shared<BufferData>();
             cs.state.bufferData->buffer = gb;
@@ -948,10 +1046,29 @@ void WaylandCompositor::bufferThreadLoop() {
             cs.state.bufferData->flags |= BufferData::BufferDataChange::frameNumberChanged;
             cs.state.bufferData->acquireFence = std::move(acquireFence);
             cs.state.bufferData->producerId = item.producerId;
+            if (hasDmabuf) {
+                cs.state.bufferData->releaseBufferListener = mReleaseListener;
+                cs.state.bufferData->releaseBufferEndpoint =
+                        IInterface::asBinder(mReleaseListener);
+            }
             cs.state.crop = FloatRect(0, 0, item.width, item.height);
+
+            // Register a per-layer callback so SF invokes onReleaseBuffer with
+            // HWC's release fence when the buffer is replaced.
+            // Must be set BEFORE moving cs into the transaction.
+            if (hasDmabuf) {
+                CallbackId cbId;
+                cbId.id = static_cast<int64_t>(item.frameNumber);
+                cbId.type = CallbackId::Type::ON_COMPLETE;
+                std::vector<CallbackId> cbIds = {cbId};
+                cs.state.listeners.emplace_back(
+                        IInterface::asBinder(mReleaseListener), cbIds);
+            }
+
             txn.mComposerStates.push_back(std::move(cs));
             txn.mId = (static_cast<uint64_t>(item.layerId) << 32) | item.frameNumber;
             txn.mIsAutoTimestamp = true;
+
             mFlinger.setTransactionState(std::move(txn), /*applyToken=*/nullptr);
 
             ALOGD("BufferThread: submitting %dx%d buffer to layer %u frame %" PRIu64,

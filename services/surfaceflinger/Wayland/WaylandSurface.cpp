@@ -32,6 +32,8 @@
 
 #include <atomic>
 #include <cstring>
+#include <linux/dma-buf.h>
+#include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 
@@ -174,7 +176,7 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
             if (dmabuf->planes.empty()) {
                 ALOGE("wl_surface.commit: dmabuf buffer has no planes");
             } else {
-                surface->importBuffer(dmabuf);
+                surface->importBuffer(dmabuf, surface->pendingBuffer);
                 imported = true;
             }
         } else if (base->bufferType == WaylandBufferType::Shm) {
@@ -187,8 +189,13 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
         }
 
         if (imported) {
-            // Queue the previous buffer for release after the next composite.
-            if (surface->currentBuffer && surface->currentBuffer != surface->pendingBuffer) {
+            // For dmabuf: SF's releaseBufferListener callback handles the
+            // release (with HWC fence import into the dma-buf).
+            // For SHM: use the time-based release queue (compositor owns the
+            // gralloc copy, so no fence is needed).
+            bool isDmabuf = base && base->bufferType == WaylandBufferType::Dmabuf;
+            if (!isDmabuf && surface->currentBuffer &&
+                surface->currentBuffer != surface->pendingBuffer) {
                 surface->compositor->queueBufferRelease(surface->currentBuffer);
             }
             surface->currentBuffer = surface->pendingBuffer;
@@ -212,7 +219,8 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
     surface->pendingFrameCallbacks.clear();
 }
 
-void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf) {
+void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf,
+                                   struct wl_resource* wlBuffer) {
     const uint32_t numPlanes = static_cast<uint32_t>(dmabuf->planes.size());
     if (numPlanes == 0) {
         ALOGE("Invalid plane count %u", numPlanes);
@@ -236,15 +244,16 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf) {
         inodeKey = st.st_ino;
     }
 
-    sp<GraphicBuffer> gb;
+    // Look up cached gralloc handle, or import if first time seeing this dmabuf.
+    ImportedHandle* cached = nullptr;
     if (inodeKey != 0) {
         auto it = importedBuffers.find(inodeKey);
         if (it != importedBuffers.end()) {
-            gb = it->second;
+            cached = &it->second;
         }
     }
 
-    if (!gb) {
+    if (!cached) {
         // --- QTI gralloc zero-copy import via private_handle_t ---
         int metaFd = static_cast<int>(
                 syscall(__NR_memfd_create, "wayland_dmabuf_meta", MFD_CLOEXEC));
@@ -299,29 +308,40 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf) {
                 native_handle_delete(hnd);
 
                 if (importErr == NO_ERROR && importedHandle) {
-                    sp<GraphicBuffer> candidate = sp<GraphicBuffer>::make(
-                            importedHandle, GraphicBuffer::WRAP_HANDLE,
-                            w, h, pixFmt, 1u, usage, pixelStride);
-                    if (candidate->initCheck() == NO_ERROR) {
-                        gb = std::move(candidate);
-                        if (inodeKey != 0) {
-                            importedBuffers[inodeKey] = gb;
-                        }
-                        ALOGD("dmabuf import: QTI gralloc imported %ux%u (inode %" PRIu64 ")",
-                              w, h, inodeKey);
+                    ImportedHandle ih;
+                    ih.handle = importedHandle;
+                    ih.width = w;
+                    ih.height = h;
+                    ih.format = pixFmt;
+                    ih.pixelStride = pixelStride;
+                    ih.usage = usage;
+                    if (inodeKey != 0) {
+                        importedBuffers[inodeKey] = ih;
+                        cached = &importedBuffers[inodeKey];
                     } else {
-                        GraphicBufferMapper::get().freeBuffer(importedHandle);
+                        // No inode key — unlikely, but import anyway as one-shot.
+                        importedBuffers[reinterpret_cast<uint64_t>(importedHandle)] = ih;
+                        cached = &importedBuffers[reinterpret_cast<uint64_t>(importedHandle)];
                     }
+                    ALOGD("dmabuf import: QTI gralloc imported %ux%u (inode %" PRIu64 ")",
+                          w, h, inodeKey);
                 }
             }
             close(metaFd);
         }
     }
 
-    if (!gb) {
+    if (!cached || !cached->handle) {
         ALOGE("dmabuf import: all strategies failed for %ux%u", w, h);
         return;
     }
+
+    // Create a fresh GraphicBuffer wrapper each frame so HWC sees a unique
+    // buffer ID and doesn't skip the update via its buffer cache.
+    sp<GraphicBuffer> gb = sp<GraphicBuffer>::make(
+            cached->handle, GraphicBuffer::WRAP_HANDLE,
+            cached->width, cached->height, cached->format,
+            1u, cached->usage, cached->pixelStride);
 
     ++frameNumber;
 
@@ -334,6 +354,21 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf) {
     bw.width = dmabuf->width;
     bw.height = dmabuf->height;
     bw.dmabufFd = dup(dmabuf->planes[0].fd);
+    bw.wlBuffer = wlBuffer; // track for fence-based release
+
+    // Extract GPU fence NOW on the dispatch thread — by the time the buffer
+    // thread processes this, the GPU will likely have finished and the fence
+    // will be stale/signaled.  Extracting here catches it while still active.
+    {
+        struct dma_buf_export_sync_file exportSync = {};
+        exportSync.flags = DMA_BUF_SYNC_READ;
+        exportSync.fd = -1;
+        if (ioctl(bw.dmabufFd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &exportSync) == 0 &&
+            exportSync.fd >= 0) {
+            bw.acquireFence = sp<Fence>::make(exportSync.fd);
+        }
+    }
+
     compositor->postBufferWork(std::move(bw));
 
     ALOGD("wl_surface.commit: imported %dx%d buffer (fmt=0x%08x) to layer %u, frame %" PRIu64,

@@ -27,6 +27,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <gui/ITransactionCompletedListener.h>
 #include <ui/GraphicBuffer.h>
 
 #include "WaylandDmabuf.h"
@@ -137,10 +138,9 @@ private:
     std::mutex mCallbacksMutex;
     std::vector<struct wl_resource*> mPendingFrameCallbacks GUARDED_BY(mCallbacksMutex);
 
-    // Two-stage buffer release: buffers are first added to mPendingBufferReleases,
-    // then on the next composite cycle moved to mReadyBufferReleases, then on the
-    // NEXT composite cycle actually released. This 2-frame delay ensures HWC has
-    // fully finished scanning out the buffer before the client reuses it.
+    // Two-stage buffer release: pending → ready → released.
+    // Buffers go through 2 VSYNC cycles after replacement before the client
+    // can reuse them.
     std::vector<struct wl_resource*> mPendingBufferReleases GUARDED_BY(mCallbacksMutex);
     std::vector<struct wl_resource*> mReadyBufferReleases GUARDED_BY(mCallbacksMutex);
     uint32_t mPendingVsyncTimeMs GUARDED_BY(mCallbacksMutex) = 0;
@@ -165,6 +165,35 @@ private:
     // Actually fire frame callbacks/releases (called on Wayland thread).
     void doFireFrameCallbacksAndReleases();
 
+    // --- HWC release fence listener ---
+    // When SF/HWC finishes scanning a buffer, this listener receives the
+    // release fence.  We import it into the client's dma-buf (so the client's
+    // next GPU submission waits) and then send wl_buffer.release.
+    class ReleaseListener : public BnTransactionCompletedListener {
+    public:
+        explicit ReleaseListener(WaylandCompositor& compositor) : mCompositor(compositor) {}
+        void onTransactionCompleted(ListenerStats stats) override;
+        void onReleaseBuffer(ReleaseCallbackId callbackId, sp<Fence> releaseFence,
+                             uint32_t currentMaxAcquiredBufferCount, bool removeFromCache) override;
+        void onTransactionQueueStalled(const String8&) override {}
+        void onTrustedPresentationChanged(int, bool) override {}
+    private:
+        WaylandCompositor& mCompositor;
+    };
+    sp<ReleaseListener> mReleaseListener;
+
+    // Map GraphicBuffer ID → (wl_buffer resource, dup'd dmabuf fd) for
+    // fence-based release of dmabuf buffers.
+    struct PendingRelease {
+        struct wl_resource* buffer = nullptr;
+        int dmabufFd = -1; // dup'd fd for importing release fence
+    };
+    std::mutex mReleaseMutex;
+    std::unordered_map<uint64_t, PendingRelease> mPendingDmabufReleases GUARDED_BY(mReleaseMutex);
+
+    // Called by ReleaseListener on binder thread.
+    void onBufferReleased(uint64_t bufferId, uint64_t frameNumber, sp<Fence> releaseFence);
+
     // --- Buffer submission thread ---
     // Buffer imports (gralloc alloc + pixel copy + setTransactionState) are posted
     // to a dedicated thread to avoid blocking the Wayland dispatch thread, which
@@ -182,6 +211,8 @@ public:
         int32_t width;
         int32_t height;
         int dmabufFd = -1; // dup'd dmabuf fd for sync (buffer thread will close)
+        sp<Fence> acquireFence; // GPU fence extracted at commit time
+        struct wl_resource* wlBuffer = nullptr; // for fence-based release tracking
     };
     void postBufferWork(BufferWork&& work);
 

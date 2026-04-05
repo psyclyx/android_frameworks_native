@@ -48,9 +48,18 @@ struct WaylandSurface {
     // Current committed buffer (released when replaced or surface destroyed)
     struct wl_resource* currentBuffer = nullptr;
 
-    // Cache of imported GraphicBuffers keyed by dmabuf fd inode.
-    // Vulkan swapchains reuse the same 4 dmabuf fds, so we import once and reuse.
-    std::unordered_map<uint64_t, sp<GraphicBuffer>> importedBuffers;
+    // Cache of gralloc-imported handles keyed by dmabuf fd inode.
+    // We cache the handle but create a fresh GraphicBuffer per frame so each
+    // submission gets a unique buffer ID (required by HWC buffer cache).
+    struct ImportedHandle {
+        buffer_handle_t handle = nullptr;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        PixelFormat format = 0;
+        uint32_t pixelStride = 0;
+        uint64_t usage = 0;
+    };
+    std::unordered_map<uint64_t, ImportedHandle> importedBuffers;
 
     // XDG role resources (set when xdg_surface/toplevel are created)
     struct wl_resource* xdgSurface = nullptr;
@@ -87,7 +96,7 @@ struct WaylandSurface {
 
     static void onDestroy(struct wl_resource* resource);
 
-    void importBuffer(struct WaylandDmabufBuffer* dmabuf);
+    void importBuffer(struct WaylandDmabufBuffer* dmabuf, struct wl_resource* wlBuffer);
     void importShmBuffer(struct WaylandShmBuffer* shm);
 };
 
