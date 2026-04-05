@@ -426,6 +426,9 @@ public class WaylandWindowActivity extends Activity {
         });
 
         // When the SurfaceView is ready, report to compositor for reparenting
+        // Hide until buffer is reparented to avoid flicker
+        container.setVisibility(View.INVISIBLE);
+
         sv.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {
@@ -436,6 +439,8 @@ public class WaylandWindowActivity extends Activity {
                         service.onWindowSurfaceReady(dialogLayerId, sc);
                     }
                 }
+                // Show after reparent transaction is submitted
+                container.post(() -> container.setVisibility(View.VISIBLE));
             }
 
             @Override
@@ -552,6 +557,9 @@ public class WaylandWindowActivity extends Activity {
             return true;
         });
 
+        // Hide until buffer is reparented to avoid flicker
+        container.setVisibility(View.INVISIBLE);
+
         sv.getHolder().addCallback(new SurfaceHolder.Callback() {
             @Override
             public void surfaceCreated(SurfaceHolder holder) {
@@ -562,6 +570,8 @@ public class WaylandWindowActivity extends Activity {
                         service.onWindowSurfaceReady(popupLayerId, sc);
                     }
                 }
+                // Show after reparent transaction is submitted
+                container.post(() -> container.setVisibility(View.VISIBLE));
             }
 
             @Override
