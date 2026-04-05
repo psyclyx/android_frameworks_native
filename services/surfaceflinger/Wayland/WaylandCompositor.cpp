@@ -429,8 +429,6 @@ void WaylandCompositor::removeSurface(struct wl_resource* resource) {
     if (it != mSurfaces.end()) {
         uint32_t layerId = it->second->layerId;
         mSurfaces.erase(it);
-        // Erasing destroys WaylandSurface, which drops sp<IBinder> handle.
-        // ~LayerHandle() calls onHandleDestroyed() to remove the Layer from SF.
         ALOGI("Removed Wayland surface and SF layer %u", layerId);
     }
 }
