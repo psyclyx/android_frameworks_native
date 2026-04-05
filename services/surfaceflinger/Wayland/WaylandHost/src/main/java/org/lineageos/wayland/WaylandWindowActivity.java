@@ -1,16 +1,20 @@
 package org.lineageos.wayland;
 
 import android.app.Activity;
+import android.graphics.PixelFormat;
 import android.graphics.Rect;
 import android.os.Bundle;
 import android.os.RemoteException;
 import android.util.Log;
+import android.util.SparseArray;
+import android.view.Gravity;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.SurfaceControl;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
 import android.view.View;
+import android.view.WindowManager;
 import android.text.InputType;
 import android.view.inputmethod.BaseInputConnection;
 import android.view.inputmethod.EditorInfo;
@@ -46,6 +50,9 @@ public class WaylandWindowActivity extends Activity {
     private View mImeAnchor;
     private boolean mImeVisible;
     private int mLastReportedHeight = 0;
+
+    // Dialog sub-windows hosted by this Activity
+    private final SparseArray<DialogPanel> mDialogPanels = new SparseArray<>();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -180,7 +187,22 @@ public class WaylandWindowActivity extends Activity {
     @Override
     protected void onDestroy() {
         Log.i(TAG, "onDestroy: layerId=" + mLayerId);
+
+        // Remove all dialog sub-windows hosted by this Activity
         WaylandWindowService service = WaylandWindowService.getInstance();
+        for (int i = mDialogPanels.size() - 1; i >= 0; i--) {
+            DialogPanel panel = mDialogPanels.valueAt(i);
+            try {
+                getWindowManager().removeView(panel.rootView);
+            } catch (Exception e) {
+                Log.w(TAG, "Failed to remove dialog panel on destroy", e);
+            }
+            if (service != null) {
+                service.unregisterDialogHost(panel.layerId);
+            }
+        }
+        mDialogPanels.clear();
+
         if (service != null) {
             service.onWindowDestroyed(mLayerId);
         }
@@ -310,9 +332,178 @@ public class WaylandWindowActivity extends Activity {
         });
     }
 
-    private IWaylandWindowCallback getCallback() {
+    // --- Dialog sub-window support ---
+
+    private static class DialogPanel {
+        final int layerId;
+        final View rootView;
+        final SurfaceView surfaceView;
+
+        DialogPanel(int layerId, View rootView, SurfaceView surfaceView) {
+            this.layerId = layerId;
+            this.rootView = rootView;
+            this.surfaceView = surfaceView;
+        }
+    }
+
+    /**
+     * Create a TYPE_APPLICATION_PANEL sub-window for a dialog (child toplevel).
+     * The panel floats above this Activity, has no dimming, and receives its own
+     * input events routed to the dialog's layerId.
+     * Must be called on the UI thread.
+     */
+    void addDialogWindow(int dialogLayerId, String title, int width, int height) {
+        Log.i(TAG, "addDialogWindow: dialogLayerId=" + dialogLayerId
+                + " title=" + title + " on host=" + mLayerId);
+
+        // Container: FrameLayout wrapping a SurfaceView
+        FrameLayout container = new FrameLayout(this);
+        SurfaceView sv = new SurfaceView(this);
+        container.addView(sv, new FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT,
+                FrameLayout.LayoutParams.MATCH_PARENT));
+
+        // Forward touch events on the panel to the dialog's layerId
+        container.setOnTouchListener((v, event) -> {
+            IWaylandWindowCallback callback = getCallbackFor(dialogLayerId);
+            if (callback == null) return false;
+
+            long timeMs = event.getEventTime();
+            // Coordinates are relative to the panel view
+            float x = event.getX();
+            float y = event.getY();
+
+            try {
+                switch (event.getActionMasked()) {
+                    case MotionEvent.ACTION_DOWN:
+                        callback.onPointerMotion(dialogLayerId, timeMs, x, y);
+                        callback.onPointerButton(dialogLayerId, timeMs, BTN_LEFT, true);
+                        break;
+                    case MotionEvent.ACTION_MOVE:
+                        callback.onPointerMotion(dialogLayerId, timeMs, x, y);
+                        break;
+                    case MotionEvent.ACTION_UP:
+                        callback.onPointerMotion(dialogLayerId, timeMs, x, y);
+                        callback.onPointerButton(dialogLayerId, timeMs, BTN_LEFT, false);
+                        break;
+                    case MotionEvent.ACTION_CANCEL:
+                        callback.onPointerButton(dialogLayerId, timeMs, BTN_LEFT, false);
+                        break;
+                }
+            } catch (RemoteException e) {
+                Log.w(TAG, "Failed to forward dialog touch", e);
+            }
+            return true;
+        });
+
+        // Forward key events on the panel to the dialog's layerId
+        container.setFocusable(true);
+        container.setFocusableInTouchMode(true);
+        container.setOnKeyListener((v, keyCode, event) -> {
+            IWaylandWindowCallback callback = getCallbackFor(dialogLayerId);
+            if (callback == null) return false;
+
+            int evdevKey = androidKeyToEvdev(keyCode, event.getScanCode());
+            if (evdevKey < 0) return false;
+
+            try {
+                boolean pressed = event.getAction() == KeyEvent.ACTION_DOWN;
+                if (event.getAction() == KeyEvent.ACTION_DOWN
+                        || event.getAction() == KeyEvent.ACTION_UP) {
+                    callback.onKey(dialogLayerId, event.getEventTime(), evdevKey, pressed);
+                    return true;
+                }
+            } catch (RemoteException e) {
+                Log.w(TAG, "Failed to forward dialog key", e);
+            }
+            return false;
+        });
+
+        // When the SurfaceView is ready, report to compositor for reparenting
+        sv.getHolder().addCallback(new SurfaceHolder.Callback() {
+            @Override
+            public void surfaceCreated(SurfaceHolder holder) {
+                SurfaceControl sc = sv.getSurfaceControl();
+                if (sc != null && sc.isValid()) {
+                    WaylandWindowService service = WaylandWindowService.getInstance();
+                    if (service != null) {
+                        service.onWindowSurfaceReady(dialogLayerId, sc);
+                    }
+                }
+            }
+
+            @Override
+            public void surfaceChanged(SurfaceHolder holder, int format, int w, int h) {
+                IWaylandWindowCallback callback = getCallbackFor(dialogLayerId);
+                if (callback != null) {
+                    try {
+                        callback.onWindowResized(dialogLayerId, w, h);
+                    } catch (RemoteException e) {
+                        Log.w(TAG, "Failed to forward dialog resize", e);
+                    }
+                }
+            }
+
+            @Override
+            public void surfaceDestroyed(SurfaceHolder holder) {}
+        });
+
+        // Use WRAP_CONTENT so the panel sizes to fit the dialog.
+        // The Wayland client controls its own size; on first buffer commit
+        // we'll know the actual dimensions and can update LayoutParams.
+        // For now, use the display dimensions as a reasonable default.
+        Rect displayBounds = getWindowManager().getCurrentWindowMetrics().getBounds();
+        int panelW = width > 0 ? width : displayBounds.width();
+        int panelH = height > 0 ? height : displayBounds.height();
+
+        WindowManager.LayoutParams lp = new WindowManager.LayoutParams(
+                panelW, panelH,
+                WindowManager.LayoutParams.TYPE_APPLICATION_PANEL,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                        | WindowManager.LayoutParams.FLAG_WATCH_OUTSIDE_TOUCH,
+                PixelFormat.TRANSLUCENT);
+        lp.gravity = Gravity.CENTER;
+        lp.token = getWindow().getDecorView().getWindowToken();
+        lp.setTitle("WaylandDialog:" + dialogLayerId);
+
+        getWindowManager().addView(container, lp);
+        container.requestFocus();
+
+        DialogPanel panel = new DialogPanel(dialogLayerId, container, sv);
+        mDialogPanels.put(dialogLayerId, panel);
+
         WaylandWindowService service = WaylandWindowService.getInstance();
-        return service != null ? service.getCallback(mLayerId) : null;
+        if (service != null) {
+            service.registerDialogHost(dialogLayerId, this);
+        }
+
+        Log.i(TAG, "Dialog panel added: layerId=" + dialogLayerId + " size=" + panelW + "x" + panelH);
+    }
+
+    /**
+     * Remove a dialog sub-window. Must be called on the UI thread.
+     */
+    void removeDialogWindow(int dialogLayerId) {
+        DialogPanel panel = mDialogPanels.get(dialogLayerId);
+        if (panel != null) {
+            getWindowManager().removeView(panel.rootView);
+            mDialogPanels.remove(dialogLayerId);
+            Log.i(TAG, "Dialog panel removed: layerId=" + dialogLayerId);
+        }
+
+        WaylandWindowService service = WaylandWindowService.getInstance();
+        if (service != null) {
+            service.unregisterDialogHost(dialogLayerId);
+        }
+    }
+
+    private IWaylandWindowCallback getCallback() {
+        return getCallbackFor(mLayerId);
+    }
+
+    private static IWaylandWindowCallback getCallbackFor(int layerId) {
+        WaylandWindowService service = WaylandWindowService.getInstance();
+        return service != null ? service.getCallback(layerId) : null;
     }
 
     /**

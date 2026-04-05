@@ -54,14 +54,20 @@ public class WaylandWindowService extends Service {
             String displayTitle = title != null ? title : (appId != null ? appId : "Wayland");
 
             if (parentLayerId >= 0) {
-                // Dialog: create as sub-window on parent Activity
-                WaylandWindowActivity parentActivity;
+                // Dialog: create as sub-window on the host Activity.
+                // The parent might be a top-level Activity or another dialog panel.
+                WaylandWindowActivity hostActivity;
                 synchronized (mWindows) {
-                    parentActivity = mWindows.get(parentLayerId);
+                    hostActivity = mWindows.get(parentLayerId);
                 }
-                if (parentActivity != null) {
-                    parentActivity.runOnUiThread(() ->
-                            parentActivity.addDialogWindow(layerId, displayTitle, width, height));
+                if (hostActivity == null) {
+                    // Parent is itself a dialog — find its host Activity
+                    hostActivity = findDialogHost(parentLayerId);
+                }
+                if (hostActivity != null) {
+                    final WaylandWindowActivity host = hostActivity;
+                    host.runOnUiThread(() ->
+                            host.addDialogWindow(layerId, displayTitle, width, height));
                     return;
                 }
                 Log.w(TAG, "Parent activity not found for layerId=" + parentLayerId
