@@ -66,6 +66,8 @@ void WaylandXdgShell::wmBaseDestroy(struct wl_client* /*client*/, struct wl_reso
     wl_resource_destroy(resource);
 }
 
+static void onPositionerDestroy(struct wl_resource* resource);
+
 void WaylandXdgShell::wmBaseCreatePositioner(struct wl_client* client,
                                               struct wl_resource* resource, uint32_t id) {
     int ver = wl_resource_get_version(resource);
@@ -116,7 +118,7 @@ void WaylandXdgShell::wmBasePong(struct wl_client* /*client*/, struct wl_resourc
 
 // --- xdg_positioner ---
 
-void onPositionerDestroy(struct wl_resource* resource) {
+static void onPositionerDestroy(struct wl_resource* resource) {
     delete static_cast<WaylandXdgPositioner*>(wl_resource_get_user_data(resource));
 }
 
