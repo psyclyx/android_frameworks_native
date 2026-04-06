@@ -17,9 +17,13 @@
 #undef LOG_TAG
 #define LOG_TAG "WaylandSurface"
 
-// Uncomment to apply colored stripe overlays on CPU-copied buffers.
-// Blue vertical stripes = dmabuf mmap+copy fallback path.
-// Each stripe is 8px wide, 50% opacity blend.
+// Set to 1 to force CPU-copy path for dmabuf buffers (mmap + memcpy instead
+// of zero-copy gralloc import). Useful for isolating display corruption.
+#ifndef WAYLAND_DEBUG_FORCE_CPU_COPY
+#define WAYLAND_DEBUG_FORCE_CPU_COPY 0
+#endif
+
+// Set to 1 to apply colored stripe overlays on CPU-copied buffers.
 #define WAYLAND_DEBUG_CPU_COPY_TINT 0
 
 #include "WaylandSurface.h"
@@ -541,6 +545,7 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf,
         }
     }
 
+#if WAYLAND_DEBUG_FORCE_CPU_COPY
     // DEBUG: force CPU-copy path for dmabuf to isolate gralloc handle issues.
     // mmap the dmabuf, wait for GPU fence, copy pixels into the BufferWork
     // pixel vector (like SHM), and let the buffer thread allocate a fresh
@@ -584,6 +589,7 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf,
             ALOGE("dmabuf CPU-copy: mmap failed: %s", strerror(errno));
         }
     }
+#endif // WAYLAND_DEBUG_FORCE_CPU_COPY
 
     WL_LOGV("[BUF] importBuffer: posting BufferWork layer=%u frame=%" PRIu64 " hasPix=%d hasGb=%d w=%d h=%d",
           layerId, frameNumber, !bw.pixels.empty(), bw.gb != nullptr, bw.width, bw.height);
