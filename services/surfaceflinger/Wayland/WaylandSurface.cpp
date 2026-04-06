@@ -20,7 +20,7 @@
 // Uncomment to apply colored stripe overlays on CPU-copied buffers.
 // Blue vertical stripes = dmabuf mmap+copy fallback path.
 // Each stripe is 8px wide, 50% opacity blend.
-#define WAYLAND_DEBUG_CPU_COPY_TINT 1
+#define WAYLAND_DEBUG_CPU_COPY_TINT 0
 
 #include "WaylandSurface.h"
 #include "WaylandCompositor.h"
@@ -35,6 +35,7 @@
 #include <atomic>
 #include <cstring>
 #include <linux/dma-buf.h>
+#include <poll.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -133,6 +134,16 @@ void WaylandSurface::attach(struct wl_client* /*client*/, struct wl_resource* re
     (void)y;
     surface->pendingBuffer = buffer;
     surface->bufferAttached = true;
+
+    if (buffer) {
+        auto* base = static_cast<WaylandBufferBase*>(wl_resource_get_user_data(buffer));
+        WL_LOGV("[BUF] attach: layer=%u type=%s buffer=%p",
+              surface->layerId,
+              base ? (base->bufferType == WaylandBufferType::Dmabuf ? "dmabuf" : "shm") : "null",
+              buffer);
+    } else {
+        WL_LOGV("[BUF] attach: layer=%u NULL buffer (unmap)", surface->layerId);
+    }
 }
 
 void WaylandSurface::damage(struct wl_client* /*client*/, struct wl_resource* /*resource*/,
@@ -166,13 +177,17 @@ void WaylandSurface::setInputRegion(struct wl_client* /*client*/,
 void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* resource) {
     auto* surface = static_cast<WaylandSurface*>(wl_resource_get_user_data(resource));
 
+    WL_LOGV("[BUF] commit: layer=%u attached=%d pending=%p currentBuf=%p hasLayer=%d",
+          surface->layerId, surface->bufferAttached, surface->pendingBuffer,
+          surface->currentBuffer, surface->layer.promote() != nullptr);
+
     if (surface->bufferAttached && surface->pendingBuffer && surface->layer.promote() != nullptr) {
         auto* base = static_cast<WaylandBufferBase*>(
                 wl_resource_get_user_data(surface->pendingBuffer));
         bool imported = false;
 
         if (!base) {
-            ALOGE("wl_surface.commit: attached buffer has no user data");
+            ALOGE("[BUF] commit: attached buffer has no user data");
         } else if (base->bufferType == WaylandBufferType::Dmabuf) {
             auto* dmabuf = static_cast<WaylandDmabufBuffer*>(base);
             if (dmabuf->planes.empty()) {
@@ -191,16 +206,18 @@ void WaylandSurface::commit(struct wl_client* /*client*/, struct wl_resource* re
         }
 
         if (imported) {
-            // For dmabuf: SF's releaseBufferListener callback handles the
-            // release (with HWC fence import into the dma-buf).
-            // For SHM: use the time-based release queue (compositor owns the
-            // gralloc copy, so no fence is needed).
-            bool isDmabuf = base && base->bufferType == WaylandBufferType::Dmabuf;
-            if (!isDmabuf && surface->currentBuffer &&
+            // With the CPU-copy debug path, all buffers use time-based release
+            // (compositor owns the gralloc copy, client buffer can be reused
+            // immediately after the copy).
+            if (surface->currentBuffer &&
                 surface->currentBuffer != surface->pendingBuffer) {
+                WL_LOGV("[BUF] commit: releasing prev buffer=%p for layer=%u",
+                      surface->currentBuffer, surface->layerId);
                 surface->compositor->queueBufferRelease(surface->currentBuffer);
             }
             surface->currentBuffer = surface->pendingBuffer;
+            WL_LOGV("[BUF] commit: buffer imported OK, currentBuffer=%p layer=%u frame=%" PRIu64,
+                  surface->currentBuffer, surface->layerId, surface->frameNumber);
         }
         surface->bufferAttached = false;
         surface->pendingBuffer = nullptr;
@@ -337,7 +354,7 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf,
                                    struct wl_resource* wlBuffer) {
     const uint32_t numPlanes = static_cast<uint32_t>(dmabuf->planes.size());
     if (numPlanes == 0) {
-        ALOGE("Invalid plane count %u", numPlanes);
+        ALOGE("[BUF] importBuffer: invalid plane count 0");
         return;
     }
 
@@ -345,6 +362,10 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf,
     uint32_t w = static_cast<uint32_t>(dmabuf->width);
     uint32_t h = static_cast<uint32_t>(dmabuf->height);
     uint32_t stride = dmabuf->planes[0].stride;
+
+    WL_LOGV("[BUF] importBuffer: layer=%u %ux%u stride=%u fmt=0x%08x planes=%u fd=%d mod=0x%" PRIx64,
+          layerId, w, h, stride, dmabuf->format, numPlanes,
+          dmabuf->planes[0].fd, dmabuf->planes[0].modifier);
 
     uint64_t usage = GRALLOC_USAGE_HW_TEXTURE | GRALLOC_USAGE_HW_COMPOSER;
     uint32_t bpp = bytesPerPixel(pixFmt);
@@ -364,10 +385,14 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf,
         auto it = importedBuffers.find(inodeKey);
         if (it != importedBuffers.end()) {
             cached = &it->second;
+            WL_LOGV("[BUF] importBuffer: cache HIT inode=%" PRIu64 " handle=%p layer=%u",
+                  inodeKey, cached->handle, layerId);
         }
     }
 
     if (!cached) {
+        WL_LOGV("[BUF] importBuffer: cache MISS inode=%" PRIu64 " → QTI gralloc import layer=%u",
+              inodeKey, layerId);
         // --- QTI gralloc zero-copy import via private_handle_t ---
         int metaFd = static_cast<int>(
                 syscall(__NR_memfd_create, "wayland_dmabuf_meta", MFD_CLOEXEC));
@@ -396,10 +421,10 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf,
                 int idx = 2;
                 data[idx++] = kQtiGrallocMagic;
                 data[idx++] = 0x00100000 | 0x00080000;
-                data[idx++] = static_cast<int>(pixelStride);
-                data[idx++] = static_cast<int>(h);
-                data[idx++] = static_cast<int>(w);
-                data[idx++] = static_cast<int>(h);
+                data[idx++] = static_cast<int>(pixelStride); // width (aligned)
+                data[idx++] = static_cast<int>(h);          // height
+                data[idx++] = static_cast<int>(pixelStride); // unaligned_width = pixelStride too
+                data[idx++] = static_cast<int>(h);           // unaligned_height
                 data[idx++] = pixFmt;
                 data[idx++] = 0;
                 *reinterpret_cast<unsigned int*>(&data[idx++]) = 1;
@@ -421,6 +446,8 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf,
                 close(dupMetaFd);
                 native_handle_delete(hnd);
 
+                WL_LOGV("[BUF] importBuffer: importBufferNoValidate result=%d handle=%p layer=%u",
+                      importErr, importedHandle, layerId);
                 if (importErr == NO_ERROR && importedHandle) {
                     ImportedHandle ih;
                     ih.handle = importedHandle;
@@ -433,12 +460,11 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf,
                         importedBuffers[inodeKey] = ih;
                         cached = &importedBuffers[inodeKey];
                     } else {
-                        // No inode key — unlikely, but import anyway as one-shot.
                         importedBuffers[reinterpret_cast<uint64_t>(importedHandle)] = ih;
                         cached = &importedBuffers[reinterpret_cast<uint64_t>(importedHandle)];
                     }
-                    ALOGD("dmabuf import: QTI gralloc imported %ux%u (inode %" PRIu64 ")",
-                          w, h, inodeKey);
+                    WL_LOGV("dmabuf import: QTI gralloc imported %ux%u stride=%u pixStride=%u (inode %" PRIu64 ")",
+                          w, h, stride, pixelStride, inodeKey);
                 }
             }
             close(metaFd);
@@ -446,16 +472,38 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf,
     }
 
     if (!cached || !cached->handle) {
-        ALOGE("dmabuf import: all strategies failed for %ux%u", w, h);
+        ALOGE("[BUF] importBuffer: all strategies failed for %ux%u layer=%u", w, h, layerId);
         return;
     }
 
-    // Create a fresh GraphicBuffer wrapper each frame so HWC sees a unique
-    // buffer ID and doesn't skip the update via its buffer cache.
+    WL_LOGV("[BUF] importBuffer: using cached handle=%p %ux%u pixStride=%u fmt=%d layer=%u",
+          cached->handle, cached->width, cached->height, cached->pixelStride,
+          cached->format, layerId);
+
+    // Stamp a unique gralloc buffer ID into the cached handle before each
+    // WRAP_HANDLE.  QTI's SDM display engine caches DRM framebuffer objects
+    // by handle_id (the gralloc private_handle_t::id field).  If the id
+    // stays the same across frames, SDE may serve stale tile data from its
+    // internal cache.  Mutating the id forces SDE to create a fresh fb_id.
+    {
+        // private_handle_t::id is at int offset 11 (uint64_t spanning [11..12])
+        // after: fd[0], fd_metadata[1], magic[2], flags[3], width[4], height[5],
+        //        unaligned_width[6], unaligned_height[7], format[8],
+        //        buffer_type[9], layer_count[10], id[11..12]
+        constexpr int kIdIntOffset = 2 + 9; // 2 fds + 9 int fields = offset 11
+        static std::atomic<uint64_t> sFrameId{1};
+        uint64_t uniqueId = sFrameId++;
+        auto* mutableHandle = const_cast<native_handle_t*>(cached->handle);
+        memcpy(&mutableHandle->data[kIdIntOffset], &uniqueId, sizeof(uint64_t));
+    }
+
     sp<GraphicBuffer> gb = sp<GraphicBuffer>::make(
             cached->handle, GraphicBuffer::WRAP_HANDLE,
             cached->width, cached->height, cached->format,
             1u, cached->usage, cached->pixelStride);
+
+    WL_LOGV("[BUF] importBuffer: WRAP_HANDLE → gb=%p id=%" PRIu64 " initCheck=%d layer=%u",
+          gb.get(), gb ? gb->getId() : 0, gb ? gb->initCheck() : -1, layerId);
 
     ++frameNumber;
 
@@ -479,19 +527,75 @@ void WaylandSurface::importBuffer(WaylandDmabufBuffer* dmabuf,
         exportSync.fd = -1;
         if (ioctl(bw.dmabufFd, DMA_BUF_IOCTL_EXPORT_SYNC_FILE, &exportSync) == 0 &&
             exportSync.fd >= 0) {
+            // Non-blocking check: is the fence already signaled?
+            struct pollfd pfd = { .fd = exportSync.fd, .events = POLLIN };
+            int pollRes = poll(&pfd, 1, 0);
+            WL_LOGV("dmabuf fence: fd=%d status=%s (poll=%d revents=0x%x)",
+                  exportSync.fd,
+                  pollRes > 0 ? "ALREADY_SIGNALED" : "ACTIVE",
+                  pollRes, pfd.revents);
             bw.acquireFence = sp<Fence>::make(exportSync.fd);
+        } else {
+            ALOGW("dmabuf fence: EXPORT_SYNC_FILE failed (errno=%d: %s)",
+                  errno, strerror(errno));
         }
     }
 
-    compositor->postBufferWork(std::move(bw));
+    // DEBUG: force CPU-copy path for dmabuf to isolate gralloc handle issues.
+    // mmap the dmabuf, wait for GPU fence, copy pixels into the BufferWork
+    // pixel vector (like SHM), and let the buffer thread allocate a fresh
+    // gralloc buffer. If display corruption vanishes, the zero-copy handle
+    // import is the problem.
+    {
+        WL_LOGV("[BUF] importBuffer: CPU-copy fallback: waiting for fence layer=%u frame=%" PRIu64,
+              layerId, frameNumber);
+        if (bw.acquireFence && bw.acquireFence->isValid()) {
+            bw.acquireFence->waitForever("dmabuf_cpu_copy_wait");
+            WL_LOGV("[BUF] importBuffer: fence wait done layer=%u", layerId);
+        }
+        size_t mapSize = static_cast<size_t>(stride) * h;
+        void* mapped = mmap(nullptr, mapSize, PROT_READ, MAP_SHARED,
+                            dmabuf->planes[0].fd, 0);
+        WL_LOGV("[BUF] importBuffer: mmap fd=%d size=%zu result=%p layer=%u",
+              dmabuf->planes[0].fd, mapSize, mapped, layerId);
+        if (mapped != MAP_FAILED) {
+            bw.pixels.resize(mapSize);
+            memcpy(bw.pixels.data(), mapped, mapSize);
+            munmap(mapped, mapSize);
+            // Switch to SHM-style path: clear the GraphicBuffer so buffer
+            // thread allocates a fresh one and does the pixel copy.
+            bw.gb = nullptr;
+            // Force RGBA_8888 for the gralloc alloc (SwiftShader can't
+            // texture BGRA_8888).  The BGRA→RGBA swizzle in the buffer
+            // thread converts the dmabuf's [B,G,R,A] memory layout to
+            // the [R,G,B,A] layout that RGBA_8888 expects.
+            bw.pixFmt = PIXEL_FORMAT_RGBA_8888;
+            bw.srcStride = stride;
+            bw.skipSwizzle = false;
+            bw.acquireFence = nullptr; // already waited
+            // Close the dmabuf fd — we don't need zero-copy tracking.
+            if (bw.dmabufFd >= 0) {
+                close(bw.dmabufFd);
+                bw.dmabufFd = -1;
+            }
+            bw.wlBuffer = nullptr; // use time-based release instead
+            WL_LOGV("dmabuf CPU-copy: %ux%u stride=%u → SHM-style path", w, h, stride);
+        } else {
+            ALOGE("dmabuf CPU-copy: mmap failed: %s", strerror(errno));
+        }
+    }
 
-    ALOGD("wl_surface.commit: imported %dx%d buffer (fmt=0x%08x) to layer %u, frame %" PRIu64,
-          dmabuf->width, dmabuf->height, dmabuf->format, layerId, frameNumber);
+    WL_LOGV("[BUF] importBuffer: posting BufferWork layer=%u frame=%" PRIu64 " hasPix=%d hasGb=%d w=%d h=%d",
+          layerId, frameNumber, !bw.pixels.empty(), bw.gb != nullptr, bw.width, bw.height);
+    compositor->postBufferWork(std::move(bw));
 }
 
 void WaylandSurface::importShmBuffer(WaylandShmBuffer* shm) {
+    WL_LOGV("[BUF] importShmBuffer: layer=%u %dx%d stride=%d fmt=0x%08x offset=%d",
+          layerId, shm->width, shm->height, shm->stride, shm->format, shm->offset);
+
     if (!shm->pool || !shm->pool->data) {
-        ALOGE("wl_surface.commit: SHM buffer has no pool or pool data");
+        ALOGE("[BUF] importShmBuffer: no pool or pool data layer=%u", layerId);
         return;
     }
 
@@ -535,10 +639,9 @@ void WaylandSurface::importShmBuffer(WaylandShmBuffer* shm) {
     work.layerId = layerId;
     work.width = shm->width;
     work.height = shm->height;
+    WL_LOGV("[BUF] importShmBuffer: posting BufferWork layer=%u frame=%" PRIu64 " dataSize=%zu",
+          layerId, frameNumber, work.pixels.size());
     compositor->postBufferWork(std::move(work));
-
-    ALOGD("wl_surface.commit: queued SHM %dx%d buffer (fmt=0x%08x) to layer %u, frame %" PRIu64,
-          shm->width, shm->height, shm->format, layerId, frameNumber);
 }
 
 void WaylandSurface::setBufferTransform(struct wl_client* /*client*/,
@@ -565,6 +668,8 @@ void WaylandSurface::offset(struct wl_client* /*client*/, struct wl_resource* /*
 void WaylandSurface::onDestroy(struct wl_resource* resource) {
     auto* surface = static_cast<WaylandSurface*>(wl_resource_get_user_data(resource));
     if (surface) {
+        WL_LOGV("[BUF] onDestroy: layer=%u currentBuffer=%p importedBuffers=%zu",
+              surface->layerId, surface->currentBuffer, surface->importedBuffers.size());
         if (surface->currentBuffer) {
             wl_buffer_send_release(surface->currentBuffer);
             surface->currentBuffer = nullptr;

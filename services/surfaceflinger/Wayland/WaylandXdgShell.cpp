@@ -268,7 +268,7 @@ void WaylandXdgShell::xdgSurfaceSetWindowGeometry(struct wl_client* /*client*/,
         xdgSurface->geomY = y;
         xdgSurface->geomWidth = width;
         xdgSurface->geomHeight = height;
-        ALOGD("set_window_geometry: %d,%d %dx%d", x, y, width, height);
+        WL_LOGV("set_window_geometry: %d,%d %dx%d", x, y, width, height);
     }
 }
 

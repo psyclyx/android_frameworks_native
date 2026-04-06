@@ -16,6 +16,18 @@
 
 #pragma once
 
+// Set to 1 to enable per-frame verbose logging (attach/commit/import/release).
+// Useful for debugging buffer flow but generates hundreds of lines per second.
+#ifndef WAYLAND_DEBUG_VERBOSE
+#define WAYLAND_DEBUG_VERBOSE 0
+#endif
+
+#if WAYLAND_DEBUG_VERBOSE
+#define WL_LOGV(...) ALOGI(__VA_ARGS__)
+#else
+#define WL_LOGV(...) ((void)0)
+#endif
+
 #include <wayland-server-core.h>
 #include <utils/Looper.h>
 

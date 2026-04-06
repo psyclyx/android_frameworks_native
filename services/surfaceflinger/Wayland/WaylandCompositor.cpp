@@ -994,7 +994,7 @@ void WaylandCompositor::fireFrameCallbacks(uint32_t vsyncTimeMs) {
 }
 
 void WaylandCompositor::queueBufferRelease(struct wl_resource* buffer) {
-    ALOGI("[BUF] queueBufferRelease: buffer=%p", buffer);
+    WL_LOGV("[BUF] queueBufferRelease: buffer=%p", buffer);
     std::lock_guard<std::mutex> lock(mCallbacksMutex);
     mPendingBufferReleases.push_back(buffer);
 }
@@ -1033,11 +1033,11 @@ void WaylandCompositor::doFireFrameCallbacksAndReleases() {
     }
 
     if (!releasable.empty() || !callbacks.empty()) {
-        ALOGI("[BUF] doFire: releasing %zu buffers, firing %zu frame callbacks, vsync=%u",
+        WL_LOGV("[BUF] doFire: releasing %zu buffers, firing %zu frame callbacks, vsync=%u",
               releasable.size(), callbacks.size(), vsyncMs);
     }
     for (auto* buf : releasable) {
-        ALOGI("[BUF] doFire: wl_buffer_send_release buf=%p", buf);
+        WL_LOGV("[BUF] doFire: wl_buffer_send_release buf=%p", buf);
         wl_buffer_send_release(buf);
     }
     for (auto* cb : callbacks) {
@@ -1178,10 +1178,10 @@ void WaylandCompositor::notifyBufferDestroyed(struct wl_resource* buffer) {
 // --- HWC release fence handling ---
 
 void WaylandCompositor::ReleaseListener::onTransactionCompleted(ListenerStats stats) {
-    ALOGI("[BUF] onTransactionCompleted: %zu transactions", stats.transactionStats.size());
+    WL_LOGV("[BUF] onTransactionCompleted: %zu transactions", stats.transactionStats.size());
     for (const auto& transactionStats : stats.transactionStats) {
         for (const auto& surfaceStats : transactionStats.surfaceStats) {
-            ALOGI("[BUF]   surfaceStats: prevReleaseId=%" PRIu64 "/%" PRIu64 " fence=%s",
+            WL_LOGV("[BUF]   surfaceStats: prevReleaseId=%" PRIu64 "/%" PRIu64 " fence=%s",
                   surfaceStats.previousReleaseCallbackId.bufferId,
                   surfaceStats.previousReleaseCallbackId.framenumber,
                   surfaceStats.previousReleaseFence ? "yes" : "no");
@@ -1198,7 +1198,7 @@ void WaylandCompositor::ReleaseListener::onTransactionCompleted(ListenerStats st
 void WaylandCompositor::ReleaseListener::onReleaseBuffer(
         ReleaseCallbackId callbackId, sp<Fence> releaseFence,
         uint32_t /*currentMaxAcquiredBufferCount*/, bool /*removeFromCache*/) {
-    ALOGI("[BUF] onReleaseBuffer: bufferId=%" PRIu64 " frame=%" PRIu64 " fence=%s",
+    WL_LOGV("[BUF] onReleaseBuffer: bufferId=%" PRIu64 " frame=%" PRIu64 " fence=%s",
           callbackId.bufferId, callbackId.framenumber,
           releaseFence && releaseFence->isValid() ? "valid" : "none");
     mCompositor.onBufferReleased(callbackId.bufferId, callbackId.framenumber,
@@ -1238,7 +1238,8 @@ void WaylandCompositor::onBufferReleased(uint64_t bufferId, uint64_t /*frameNumb
             close(fenceFd);
         }
     }
-    ALOGI("[BUF] onBufferReleased: bufferId=%" PRIu64 " dmabufFd=%d releaseFence=%s imported=%s",
+    (void)fenceImported; // used only by WL_LOGV
+    WL_LOGV("[BUF] onBufferReleased: bufferId=%" PRIu64 " dmabufFd=%d releaseFence=%s imported=%s",
           bufferId, pr.dmabufFd,
           (releaseFence && releaseFence->isValid()) ? "VALID" : "NONE",
           fenceImported ? "YES" : "NO");
@@ -1275,7 +1276,7 @@ void WaylandCompositor::onBufferReleased(uint64_t bufferId, uint64_t /*frameNumb
 }
 
 void WaylandCompositor::postBufferWork(BufferWork&& work) {
-    ALOGI("[BUF] postBufferWork: layer=%u frame=%" PRIu64 " %dx%d hasPix=%d hasGb=%d dmabufFd=%d",
+    WL_LOGV("[BUF] postBufferWork: layer=%u frame=%" PRIu64 " %dx%d hasPix=%d hasGb=%d dmabufFd=%d",
           work.layerId, work.frameNumber, work.width, work.height,
           !work.pixels.empty(), work.gb != nullptr, work.dmabufFd);
     {
@@ -1298,7 +1299,7 @@ void WaylandCompositor::bufferThreadLoop() {
         }
 
         for (auto& item : work) {
-            ALOGI("[BUF] bufferThread: processing layer=%u frame=%" PRIu64 " %dx%d hasPix=%d hasGb=%d",
+            WL_LOGV("[BUF] bufferThread: processing layer=%u frame=%" PRIu64 " %dx%d hasPix=%d hasGb=%d",
                   item.layerId, item.frameNumber, item.width, item.height,
                   !item.pixels.empty(), item.gb != nullptr);
 
@@ -1308,7 +1309,7 @@ void WaylandCompositor::bufferThreadLoop() {
 
             // --- Pixel copy path (SHM swizzle or dmabuf straight copy) ---
             if (!item.pixels.empty() && !gb) {
-                ALOGI("[BUF] bufferThread: pixel copy alloc %ux%u fmt=%d skipSwizzle=%d layer=%u",
+                WL_LOGV("[BUF] bufferThread: pixel copy alloc %ux%u fmt=%d skipSwizzle=%d layer=%u",
                       w, h, item.pixFmt, item.skipSwizzle, item.layerId);
                 gb = sp<GraphicBuffer>::make(w, h, item.pixFmt, 1u,
                         static_cast<uint64_t>(GRALLOC_USAGE_SW_WRITE_OFTEN |
@@ -1319,7 +1320,7 @@ void WaylandCompositor::bufferThreadLoop() {
                     ALOGE("[BUF] bufferThread: GraphicBuffer alloc FAILED layer=%u", item.layerId);
                     continue;
                 }
-                ALOGI("[BUF] bufferThread: alloc OK gb=%p id=%" PRIu64 " stride=%u layer=%u",
+                WL_LOGV("[BUF] bufferThread: alloc OK gb=%p id=%" PRIu64 " stride=%u layer=%u",
                       gb.get(), gb->getId(), gb->getStride(), item.layerId);
                 void* dst = nullptr;
                 status_t lockErr = gb->lock(GRALLOC_USAGE_SW_WRITE_OFTEN, &dst);
@@ -1332,7 +1333,7 @@ void WaylandCompositor::bufferThreadLoop() {
                 const uint8_t* src = item.pixels.data();
                 uint8_t* dstBytes = static_cast<uint8_t*>(dst);
                 const uint32_t dstStride = gb->getStride() * bpp;
-                ALOGI("[BUF] bufferThread: lock OK dst=%p srcStride=%u dstStride=%u layer=%u",
+                WL_LOGV("[BUF] bufferThread: lock OK dst=%p srcStride=%u dstStride=%u layer=%u",
                       dst, item.srcStride, dstStride, item.layerId);
 
                 if (item.skipSwizzle) {
@@ -1343,7 +1344,7 @@ void WaylandCompositor::bufferThreadLoop() {
                                src + y * item.srcStride,
                                static_cast<size_t>(w) * bpp);
                     }
-                    ALOGI("[BUF] bufferThread: straight copy done %ux%u layer=%u", w, h, item.layerId);
+                    WL_LOGV("[BUF] bufferThread: straight copy done %ux%u layer=%u", w, h, item.layerId);
                 } else {
                     // SHM path: BGRA→RGBA swizzle (WL_SHM_FORMAT_ARGB8888 →
                     // PIXEL_FORMAT_RGBA_8888).
@@ -1368,7 +1369,7 @@ void WaylandCompositor::bufferThreadLoop() {
                             dstRow[x] = (a << 24) | (b << 16) | (g << 8) | r;
                         }
                     }
-                    ALOGI("[BUF] bufferThread: swizzle copy done %ux%u layer=%u", w, h, item.layerId);
+                    WL_LOGV("[BUF] bufferThread: swizzle copy done %ux%u layer=%u", w, h, item.layerId);
                 }
                 gb->unlock();
             }
@@ -1387,7 +1388,7 @@ void WaylandCompositor::bufferThreadLoop() {
             // so we can import the fence into the dma-buf before releasing
             // the buffer back to the client.
             bool hasDmabuf = item.dmabufFd >= 0 && item.wlBuffer;
-            ALOGI("[BUF] bufferThread: hasDmabuf=%d dmabufFd=%d wlBuffer=%p gbId=%" PRIu64 " layer=%u",
+            WL_LOGV("[BUF] bufferThread: hasDmabuf=%d dmabufFd=%d wlBuffer=%p gbId=%" PRIu64 " layer=%u",
                   hasDmabuf, item.dmabufFd, item.wlBuffer, gb->getId(), item.layerId);
             if (hasDmabuf) {
                 std::lock_guard<std::mutex> lock(mReleaseMutex);
@@ -1396,7 +1397,7 @@ void WaylandCompositor::bufferThreadLoop() {
                 pr.dmabufFd = item.dmabufFd;
                 item.dmabufFd = -1; // ownership transferred
                 mPendingDmabufReleases[gb->getId()] = pr;
-                ALOGI("[BUF] bufferThread: registered pending release gbId=%" PRIu64 " total=%zu layer=%u",
+                WL_LOGV("[BUF] bufferThread: registered pending release gbId=%" PRIu64 " total=%zu layer=%u",
                       gb->getId(), mPendingDmabufReleases.size(), item.layerId);
             }
             if (item.dmabufFd >= 0) {
@@ -1434,7 +1435,7 @@ void WaylandCompositor::bufferThreadLoop() {
                         IInterface::asBinder(mReleaseListener), cbIds);
             }
 
-            ALOGI("[BUF] bufferThread: setTransactionState layer=%u frame=%" PRIu64
+            WL_LOGV("[BUF] bufferThread: setTransactionState layer=%u frame=%" PRIu64
                   " %dx%d gbId=%" PRIu64 " fence=%s crop=%.0fx%.0f producerId=%u",
                   item.layerId, item.frameNumber, item.width, item.height,
                   gb->getId(),
@@ -1446,7 +1447,7 @@ void WaylandCompositor::bufferThreadLoop() {
             txn.mIsAutoTimestamp = true;
 
             mFlinger.setTransactionState(std::move(txn), /*applyToken=*/nullptr);
-            ALOGI("[BUF] bufferThread: submitted OK layer=%u frame=%" PRIu64,
+            WL_LOGV("[BUF] bufferThread: submitted OK layer=%u frame=%" PRIu64,
                   item.layerId, item.frameNumber);
         }
     }
